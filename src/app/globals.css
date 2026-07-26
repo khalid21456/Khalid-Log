@@ -1,0 +1,803 @@
+@import "tailwindcss";
+
+/* Tailwind v4 defaults `dark:` to prefers-color-scheme. We drive it from a
+   class on <html> instead, so an explicit user choice can override the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ==========================================================================
+   Design tokens — light
+   Values are taken verbatim from DESIGN.MD `colors:` (lines 6-32).
+   ========================================================================== */
+:root {
+  --primary: #111111;
+  --primary-active: #242424;
+  --primary-disabled: #e5e7eb;
+  --ink: #111111;
+  --body: #374151;
+  --muted: #6b7280;
+  --muted-soft: #898989;
+  --hairline: #e5e7eb;
+  --hairline-soft: #f3f4f6;
+  --canvas: #ffffff;
+  --surface-soft: #f8f9fa;
+  --surface-card: #f5f5f5;
+  --surface-strong: #e5e7eb;
+  --surface-dark: #101010;
+  --surface-dark-elevated: #1a1a1a;
+  --on-primary: #ffffff;
+  --on-dark: #ffffff;
+  --on-dark-soft: #a1a1aa;
+  --accent: #3b82f6;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --badge-orange: #fb923c;
+  --badge-pink: #ec4899;
+  --badge-violet: #8b5cf6;
+  --badge-emerald: #34d399;
+
+  /* The footer is its own token: DESIGN.MD keeps it dark on light pages, and in
+     dark mode it still has to read as a distinct closing band above --canvas. */
+  --footer: #101010;
+  --footer-elevated: #1a1a1a;
+  --footer-hairline: #262626;
+
+  /* Elevation — DESIGN.MD:386. Named --elev-* so the @theme keys below
+     (--shadow-soft / --shadow-card) can reference them without self-reference. */
+  --elev-soft: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --elev-card: 0 4px 12px rgba(0, 0, 0, 0.08);
+
+  /* Code surface + syntax tokens (light). Every hue below was picked to clear
+     4.5:1 against --code-bg. */
+  --code-bg: #f8f9fa;
+  --code-ink: #1f2937;
+  --code-comment: #6b7280;
+  --code-keyword: #7c3aed;
+  --code-string: #047857;
+  --code-number: #b45309;
+  --code-function: #1d4ed8;
+  --code-attr: #be185d;
+  --code-type: #0f766e;
+  --code-meta: #6b7280;
+  --code-punctuation: #4b5563;
+  --code-deleted: #b91c1c;
+  --code-added: #047857;
+
+  /* Post body measure — see the full-bleed grid further down. */
+  --pb-text: 44rem; /* 704px reading column */
+  --pb-wide-extra: 7.5rem; /* +120px each side => ~944px */
+  --pb-gutter: 0px;
+
+  color-scheme: light;
+}
+
+/* ==========================================================================
+   Design tokens — dark
+   DESIGN.MD is a light-only spec whose only dark surfaces are `surface-dark`
+   (#101010) and `surface-dark-elevated` (#1a1a1a). The dark theme extends that
+   same family rather than introducing a new palette:
+     canvas sits one step below surface-dark so cards can lift off it,
+     surface-card becomes the documented surface-dark-elevated,
+     muted becomes the documented on-dark-soft (#a1a1aa),
+     the primary CTA inverts to white-on-dark, preserving "monochrome at the
+     action layer" (DESIGN.MD:487).
+   ========================================================================== */
+.dark {
+  --primary: #fafafa;
+  --primary-active: #e4e4e7;
+  --primary-disabled: #2a2a2a;
+  --ink: #fafafa;
+  --body: #d4d4d8;
+  --muted: #a1a1aa;
+  --muted-soft: #8b8b93;
+  --hairline: #262626;
+  --hairline-soft: #1c1c1c;
+  --canvas: #0b0b0b;
+  --surface-soft: #141414;
+  --surface-card: #1a1a1a;
+  --surface-strong: #2a2a2a;
+  --surface-dark: #1a1a1a;
+  --surface-dark-elevated: #242424;
+  --on-primary: #111111;
+  --on-dark: #fafafa;
+  --on-dark-soft: #a1a1aa;
+  --accent: #60a5fa;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
+
+  --footer: #141414;
+  --footer-elevated: #1f1f1f;
+  --footer-hairline: #2a2a2a;
+
+  --elev-soft: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --elev-card: 0 4px 12px rgba(0, 0, 0, 0.5);
+
+  /* Syntax tokens (dark) — same roles, lifted for contrast on --code-bg. */
+  --code-bg: #141414;
+  --code-ink: #e4e4e7;
+  --code-comment: #9ca3af;
+  --code-keyword: #c4b5fd;
+  --code-string: #6ee7b7;
+  --code-number: #fdba74;
+  --code-function: #93c5fd;
+  --code-attr: #f9a8d4;
+  --code-type: #5eead4;
+  --code-meta: #a1a1aa;
+  --code-punctuation: #a1a1aa;
+  --code-deleted: #fca5a5;
+  --code-added: #6ee7b7;
+
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+   Token -> Tailwind bridge
+   `inline` is essential: it makes `bg-canvas` compile to
+   `background-color: var(--canvas)` instead of baking in #ffffff, so the .dark
+   overrides above re-theme every utility with no `dark:` prefixes in the JSX.
+   ========================================================================== */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface-soft: var(--surface-soft);
+  --color-surface-card: var(--surface-card);
+  --color-surface-strong: var(--surface-strong);
+  --color-surface-dark: var(--surface-dark);
+  --color-surface-dark-elevated: var(--surface-dark-elevated);
+
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-muted-soft: var(--muted-soft);
+
+  --color-hairline: var(--hairline);
+  --color-hairline-soft: var(--hairline-soft);
+
+  --color-primary: var(--primary);
+  --color-primary-active: var(--primary-active);
+  --color-primary-disabled: var(--primary-disabled);
+  --color-on-primary: var(--on-primary);
+  --color-on-dark: var(--on-dark);
+  --color-on-dark-soft: var(--on-dark-soft);
+
+  --color-footer: var(--footer);
+  --color-footer-elevated: var(--footer-elevated);
+  --color-footer-hairline: var(--footer-hairline);
+
+  --color-accent: var(--accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-badge-orange: var(--badge-orange);
+  --color-badge-pink: var(--badge-pink);
+  --color-badge-violet: var(--badge-violet);
+  --color-badge-emerald: var(--badge-emerald);
+  --color-code-bg: var(--code-bg);
+
+  /* DESIGN.MD `rounded:` (lines 114-121) */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* DESIGN.MD `spacing:` — the 4px base unit already matches Tailwind's default
+     scale, so only the named section rhythm needs a token. */
+  --spacing-section: 96px;
+
+  --shadow-soft: var(--elev-soft);
+  --shadow-card: var(--elev-card);
+
+  /* Cal Sans is licensed and not publicly available (DESIGN.MD:357). The
+     documented substitute is Inter 600 with negative tracking, which is what
+     the .t-display-* classes below apply. To adopt real Cal Sans later, load it
+     in layout.tsx and point --font-display at it — nothing else changes. */
+  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+@layer base {
+  * {
+    border-color: var(--hairline);
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--canvas);
+    color: var(--body);
+    font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    font-size: 1rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  /* Single focus treatment everywhere, in --ink so it flips with the theme. */
+  :focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background-color: var(--ink);
+    color: var(--canvas);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ==========================================================================
+   Shell + small shared pieces
+   ========================================================================== */
+@layer components {
+  /* Max content width 1200px, centred (DESIGN.MD:370). */
+  .shell {
+    margin-inline: auto;
+    width: 100%;
+    max-width: 1200px;
+    padding-inline: 1.5rem;
+  }
+
+  /* The theme toggle renders both icons; the class on <html> picks one. This
+     keeps server and client markup identical. */
+  .theme-icon-dark {
+    display: none;
+  }
+
+  .dark .theme-icon-dark {
+    display: block;
+  }
+
+  .dark .theme-icon-light {
+    display: none;
+  }
+
+  /* Mobile navigation sheet — a native <dialog> opened with showModal(), so the
+     browser supplies the focus trap and Escape handling. Reset to a full-screen
+     panel, since a modal dialog is centred and auto-sized by default. */
+  .nav-sheet {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100%;
+    margin: 0;
+    border: 0;
+    padding: 0;
+    background-color: var(--canvas);
+    color: var(--body);
+  }
+
+  .nav-sheet::backdrop {
+    background-color: rgb(0 0 0 / 0.4);
+  }
+
+  /* Skip link — off-screen until focused. */
+  .skip-link {
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 100;
+    transform: translateY(-200%);
+    background-color: var(--primary);
+    color: var(--on-primary);
+    border-radius: var(--radius-md);
+    padding: 0.625rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    transition: transform 120ms ease-out;
+  }
+
+  .skip-link:focus-visible {
+    transform: translateY(0);
+    outline-offset: 3px;
+  }
+}
+
+/* ==========================================================================
+   Typography scale — DESIGN.MD lines 34-112.
+   Size + weight + line-height + tracking always travel together, so a display
+   headline can never lose the negative tracking the spec requires
+   (DESIGN.MD:479). Display sizes clamp down for the mobile step described at
+   DESIGN.MD:500 (hero 64 -> 32px); tracking is expressed in `em` so it scales
+   with the clamp instead of staying pinned to the desktop pixel value.
+   ========================================================================== */
+@layer components {
+  .t-display-xl {
+    font-family: var(--font-display);
+    font-size: clamp(2rem, 5.4vw, 4rem);
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: -0.031em; /* -2px at 64px */
+  }
+
+  .t-display-lg {
+    font-family: var(--font-display);
+    font-size: clamp(1.75rem, 4.2vw, 3rem);
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.031em; /* -1.5px at 48px */
+  }
+
+  .t-display-md {
+    font-family: var(--font-display);
+    font-size: clamp(1.5rem, 3.2vw, 2.25rem);
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.028em; /* -1px at 36px */
+  }
+
+  .t-display-sm {
+    font-family: var(--font-display);
+    font-size: clamp(1.375rem, 2.6vw, 1.75rem);
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.018em; /* -0.5px at 28px */
+  }
+
+  .t-title-lg {
+    font-family: var(--font-sans);
+    font-size: 1.375rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.014em;
+  }
+
+  .t-title-md {
+    font-family: var(--font-sans);
+    font-size: 1.125rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .t-title-sm {
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .t-body-md {
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    font-weight: 400;
+    line-height: 1.5;
+  }
+
+  .t-body-sm {
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    font-weight: 400;
+    line-height: 1.5;
+  }
+
+  .t-caption {
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .t-button {
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .t-nav-link {
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .t-code {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    font-weight: 400;
+    line-height: 1.5;
+  }
+}
+
+/* ==========================================================================
+   Post body
+   A five-column "full-bleed grid": every block lands in the centre reading
+   column by default, and images opt out to `wide` or `full` by changing their
+   grid span. No negative margins, so nothing can cause horizontal overflow.
+   ========================================================================== */
+@layer components {
+  .post-body {
+    display: grid;
+    grid-template-columns:
+      minmax(var(--pb-gutter), 1fr)
+      minmax(0, var(--pb-wide-extra))
+      minmax(0, var(--pb-text))
+      minmax(0, var(--pb-wide-extra))
+      minmax(var(--pb-gutter), 1fr);
+    color: var(--body);
+    font-size: 1.0625rem;
+    line-height: 1.75;
+  }
+
+  .post-body > * {
+    grid-column: 3;
+    min-width: 0;
+  }
+
+  .post-body > [data-width="wide"],
+  .post-body > [data-gallery] {
+    grid-column: 2 / 5;
+  }
+
+  .post-body > [data-width="full"] {
+    grid-column: 1 / -1;
+  }
+
+  /* Vertical rhythm */
+  .post-body > * + * {
+    margin-top: 1.5rem;
+  }
+
+  .post-body > h2 {
+    margin-top: 3rem;
+    font-family: var(--font-display);
+    font-size: 1.75rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.018em;
+    color: var(--ink);
+    scroll-margin-top: 6rem;
+  }
+
+  .post-body > h3 {
+    margin-top: 2.25rem;
+    font-family: var(--font-display);
+    font-size: 1.375rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.014em;
+    color: var(--ink);
+    scroll-margin-top: 6rem;
+  }
+
+  .post-body > h4 {
+    margin-top: 2rem;
+    font-family: var(--font-sans);
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: var(--ink);
+    scroll-margin-top: 6rem;
+  }
+
+  .post-body strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .post-body a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--muted);
+    text-underline-offset: 3px;
+  }
+
+  .post-body > ul,
+  .post-body > ol {
+    padding-left: 1.5rem;
+  }
+
+  .post-body > ul {
+    list-style: disc;
+  }
+
+  .post-body > ol {
+    list-style: decimal;
+  }
+
+  .post-body li + li {
+    margin-top: 0.5rem;
+  }
+
+  .post-body li::marker {
+    color: var(--muted);
+  }
+
+  .post-body > blockquote {
+    border-left: 2px solid var(--ink);
+    padding-left: 1.25rem;
+    color: var(--ink);
+    font-size: 1.125rem;
+    font-style: normal;
+  }
+
+  .post-body > hr {
+    border: 0;
+    border-top: 1px solid var(--hairline);
+    margin-block: 3rem;
+  }
+
+  /* Inline code — the `:not(pre)` guard keeps block code out of this rule. */
+  .post-body :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background-color: var(--surface-card);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-xs);
+    padding: 0.1em 0.35em;
+    color: var(--ink);
+  }
+
+  /* Tables (remark-gfm) */
+  .post-body > .pb-table-wrap {
+    overflow-x: auto;
+  }
+
+  .post-body table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9375rem;
+  }
+
+  .post-body th,
+  .post-body td {
+    border-bottom: 1px solid var(--hairline);
+    padding: 0.75rem 1rem;
+    text-align: left;
+  }
+
+  .post-body th {
+    color: var(--ink);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  /* ---- Images ---------------------------------------------------------- */
+  .pb-figure {
+    margin: 0;
+  }
+
+  .pb-figure > .pb-frame {
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background-color: var(--surface-card);
+  }
+
+  .post-body > .pb-figure[data-width="full"] > .pb-frame {
+    border-radius: var(--radius-xl);
+  }
+
+  .pb-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  /* `ratio="16/9"` puts a definite height on the frame and crops to fill it. */
+  .pb-figure > .pb-frame[data-crop] img {
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .pb-figure figcaption {
+    margin-top: 0.75rem;
+    color: var(--muted);
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+
+  .pb-figure figcaption a {
+    color: var(--muted);
+  }
+
+  .pb-gallery {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(var(--pb-cols, 2), minmax(0, 1fr));
+  }
+
+  @media (max-width: 640px) {
+    .pb-gallery {
+      --pb-cols: 1;
+    }
+  }
+
+  .pb-gallery .pb-figure img {
+    aspect-ratio: var(--pb-gallery-ratio, 4 / 3);
+    object-fit: cover;
+  }
+
+  /* ---- Code blocks ----------------------------------------------------- */
+  .pb-code {
+    position: relative;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    background-color: var(--code-bg);
+    overflow: hidden;
+  }
+
+  .pb-code-label {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0.5rem 0.875rem 0;
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .pb-code pre {
+    margin: 0;
+    padding: 0.875rem 1.125rem 1.125rem;
+    overflow-x: auto;
+  }
+
+  .pb-code pre code {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.7;
+    color: var(--code-ink);
+    background: none;
+    border: 0;
+    padding: 0;
+    tab-size: 2;
+  }
+
+  /* ---- Math (KaTeX) ---------------------------------------------------- */
+  /* KaTeX inherits currentColor, so it flips with the theme unaided. These
+     rules only handle sizing and overflow. */
+  .post-body .katex {
+    font-size: 1.05em;
+  }
+
+  /* A long display formula scrolls inside its own box rather than widening the
+     page. */
+  .post-body > .katex-display,
+  .post-body .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-block: 0.5rem;
+  }
+
+  .post-body .katex-error {
+    color: var(--error);
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+  }
+
+  .pb-unknown-directive {
+    border: 1px dashed var(--error);
+    border-radius: var(--radius-md);
+    padding: 0.75rem 1rem;
+    color: var(--error);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+}
+
+/* ==========================================================================
+   highlight.js theme
+   rehype-highlight emits `hljs-*` classes. The mapping below is written against
+   the palette tokens above so it flips with the theme, and it is tuned for the
+   three languages this blog targets: Python, JavaScript and TypeScript.
+     keyword  -> def/class/import/return, const/let/function/await, interface/type
+     built_in -> print/len/dict, console/Promise/Array
+     type     -> TS type annotations, Python class names
+     attr     -> object keys, Python kwargs, JSX props
+     meta     -> Python decorators, shebangs, `use client` pragmas
+   ========================================================================== */
+@layer components {
+  .hljs-comment,
+  .hljs-quote {
+    color: var(--code-comment);
+    font-style: italic;
+  }
+
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-doctag,
+  .hljs-section,
+  .hljs-name,
+  .hljs-tag {
+    color: var(--code-keyword);
+  }
+
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-template-string,
+  .hljs-char.escape_,
+  .hljs-addition {
+    color: var(--code-string);
+  }
+
+  .hljs-number,
+  .hljs-bullet,
+  .hljs-symbol {
+    color: var(--code-number);
+  }
+
+  .hljs-title,
+  .hljs-title.function_,
+  .hljs-function .hljs-title,
+  .hljs-selector-id {
+    color: var(--code-function);
+    font-weight: 600;
+  }
+
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-property,
+  .hljs-variable,
+  .hljs-template-variable,
+  .hljs-selector-attr,
+  .hljs-selector-pseudo {
+    color: var(--code-attr);
+  }
+
+  .hljs-built_in,
+  .hljs-builtin-name,
+  .hljs-class .hljs-title,
+  .hljs-title.class_,
+  .hljs-type,
+  .hljs-params > .hljs-type {
+    color: var(--code-type);
+  }
+
+  .hljs-meta,
+  .hljs-meta .hljs-keyword,
+  .hljs-meta .hljs-string,
+  .hljs-subst {
+    color: var(--code-meta);
+  }
+
+  .hljs-punctuation,
+  .hljs-operator {
+    color: var(--code-punctuation);
+  }
+
+  .hljs-deletion {
+    color: var(--code-deleted);
+  }
+
+  .hljs-emphasis {
+    font-style: italic;
+  }
+
+  .hljs-strong {
+    font-weight: 700;
+  }
+
+  .hljs-link {
+    text-decoration: underline;
+  }
+}
