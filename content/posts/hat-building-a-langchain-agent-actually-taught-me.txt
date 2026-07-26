@@ -1,0 +1,136 @@
+---
+title: What building a LangChain agent actually taught me
+date: '2026-07-26'
+excerpt: >-
+  I spent an afternoon in a notebook building a LangChain agent from scratch,
+  one piece at a time: a bare model, then tools, then memory, then a couple of
+  real external services. Nothing about it was hard on its own, but the order I
+  hit things in taught me more than any single tutorial had. This is what stuck.
+tags:
+  - langchain
+  - agents
+  - python
+cover: hero-image-1.jpg
+---
+## An agent is just a model with a menu of tools
+
+The starting point is small: a `ChatGoogleGenerativeAI` instance and `create_agent` from `langchain.agents`.
+
+```python
+llm = ChatGoogleGenerativeAI(
+    model="gemini-flash-lite-latest",
+    temperature=1,
+    max_tokens=1000,
+    timeout=30
+)
+
+agent = create_agent(
+    model=llm,
+    tools=[get_users, get_cities_info],
+    system_prompt="You are a helpful assistant"
+)
+```
+
+`get_users` and `get_cities_info` were just plain Python functions returning lists of dicts, decorated with `@tool` and given a docstring. That docstring is not decoration. It's the only description the model gets of what the tool does and when to call it. Ask the agent "what's the population of Casablanca?" and it reads the docstrings, decides `get_cities_info` is relevant, calls it, and answers from the result. No routing code, no if/else on intent. The model does that part.
+
+
+```python
+@tool
+def get_users():
+    """Retourner la liste des utilsiateurs"""
+    print("tool get users is used !")
+    users = [{"id":1,"first_name":"Ellsworth","last_name":"Oaks","email":"eoaks0@google.co.uk","gender":"Male","ip_address":"252.134.26.80"},
+        {"id":2,"first_name":"Jermaine","last_name":"Hamstead","email":"jhamstead1@ucsd.edu","gender":"Male","ip_address":"22.46.79.26"},
+        {"id":3,"first_name":"Myriam","last_name":"Schlag","email":"mschlag2@wunderground.com","gender":"Female","ip_address":"237.213.187.4"},
+        {"id":4,"first_name":"Pierrette","last_name":"Sivorn","email":"psivorn3@phoca.cz","gender":"Female","ip_address":"32.129.85.245"},
+        {"id":5,"first_name":"Evelyn","last_name":"Longstreeth","email":"elongstreeth4@epa.gov","gender":"Male","ip_address":"18.221.34.135"}]
+    return users
+
+@tool
+def get_cities_info():
+    """Retourner des informations sur les villes"""
+    print("tool get cities informations is used !")
+    cities_info = [{"city_name":"Palmerston North","population":4150872,"area_sq_km":2020.2,"average_income":17361.73,"major_industry":"technology"},
+        {"city_name":"Hayes","population":4276097,"area_sq_km":2993.58,"average_income":38119.4,"major_industry":"manufacturing"},
+        {"city_name":"Catende","population":4979107,"area_sq_km":8713.14,"average_income":16114.82,"major_industry":"manufacturing"},
+        {"city_name":"An Naşr","population":3935446,"area_sq_km":4317.43,"average_income":24833.56,"major_industry":"healthcare"},
+        {"city_name":"Cholargós","population":6442129,"area_sq_km":5135.18,"average_income":88571.58,"major_industry":"education"},
+        {"city_name":"Casablanca","population":3000000,"area_sq_km":5135.18,"average_income":88571.58,"major_industry":"IT"}]
+    return cities_info
+```
+
+
+
+
+The first gotcha showed up immediately in how the response comes back. I expected `response["messages"][-1].content` to be a string. It isn't: Gemini's responses come back as a list of content blocks, so the actual text is `response["messages"][-1].content[0]["text"]`. Small thing, but it breaks every naive `print(response["messages"][-1].content)` you'll be tempted to write.
+
+## The agent forgets you mid-conversation
+
+The next thing I tried was a two-turn conversation: tell the agent my name, then ask for it back.
+
+```python
+agent.invoke(input={"messages": [HumanMessage("Hi my name is Khalid")]})
+agent.invoke(input={"messages": [HumanMessage("what is my name ?")]})
+```
+
+It has no idea. Each `invoke` is a clean slate there is no hidden session, no implicit history. That's not a bug, it's the default: an agent only knows what's inside the `messages` list you hand it *this* call. Memory is something you opt into, not something you get for free.
+
+## Memory is a pluggable backend, not a feature flag
+
+Turning memory on means adding a `checkpointer` and a `thread_id`. For a quick prototype, `InMemorySaver` works:
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+agent2 = create_agent(
+    model=llm,
+    system_prompt="you are a helpful assistant",
+    checkpointer=InMemorySaver()
+)
+
+agent2.invoke(
+    input={"messages": [HumanMessage("Hi my name is Khalid")]},
+    config={"configurable": {"thread_id": 1}}
+)
+```
+
+The `thread_id` is what ties turns together. It's the conversation's identity, not the agent's. Swap it and you get a stranger talking to the same agent. That detail matters the moment you move past a single notebook session, because `InMemorySaver` forgets everything the instant the process exits.
+
+The fix for that is `PostgresSaver`, which is the same pattern with a real database behind it:
+
+```python
+from langgraph.checkpoint.postgres import PostgresSaver
+
+DB_URI = "postgresql://postgres:your-password@localhost:5432/memory?sslmode=disable"
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()
+    agent3 = create_agent(model=llm, tools=[], checkpointer=checkpointer)
+```
+
+`checkpointer.setup()` creates whatever tables it needs on its own no migration file to write by hand. Once that's in place, `thread_id` stops being a toy identifier and becomes exactly what it sounds like: a durable conversation you can walk away from and come back to.
+
+| Backend | Survives a restart | Setup |
+|---|---|---|
+| None (default) | No — not even mid-session | Nothing |
+| `InMemorySaver` | No | One line |
+| `PostgresSaver` | Yes | Connection string + `.setup()` |
+
+## Reaching outside the model
+
+Tools aren't limited to functions returning canned data. I wired in DuckDuckGo search through the `ddgs` package, wrapped in the same `@tool` pattern as before, and separately tried Tavily's own LangChain integration, `TavilySearch`, wrapped the same way so the agent sees a consistent tool interface regardless of which service is actually answering underneath.
+
+Having two different search backends behind the identical `@tool` shape is the part worth keeping: the agent doesn't care which service does the work, only that the docstring tells it when to reach for it.
+
+## Letting the agent write and run its own code
+
+The most interesting and the most dangerous tool I tried was giving the agent a Python REPL, using `langchain_experimental`'s `PythonREPLTool`. The library prints its own warning the moment you use it:
+
+```text
+Python REPL can execute arbitrary code. Use with caution.
+```
+
+That's not boilerplate legal text. With this tool attached, a prompt like "sort these two lists and write the code you used to a file" genuinely results in the model generating and *executing* Python, unsupervised, on my machine. It's a great way to see what an agent can do once it stops being limited to read-only lookups, and a good reminder to sandbox anything like this before it goes near real infrastructure. `langchain_experimental` also flags itself as being sunset and no longer actively maintained, which is worth knowing before building on top of it for anything long-lived.
+
+## What I'd tell myself before starting
+
+An agent, tools, and memory turned out to be three separate, composable decisions rather than one big framework choice: which model, which functions it's allowed to call, and which checkpointer if any remembers the conversation. Nothing about it is magic once you've seen it broken down into those three knobs. The one thing I didn't get to before closing the notebook was error handling what happens when a tool throws mid-call which is exactly where I'm picking this back up next.
