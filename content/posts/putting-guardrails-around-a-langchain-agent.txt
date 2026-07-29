@@ -1,0 +1,219 @@
+---
+title: Putting guardrails around a LangChain agent
+date: '2026-07-28'
+excerpt: >-
+  Four ways to keep an agent in check, redacting PII on input, pausing for
+  approval before a risky tool runs, blocking bad requests up front, and
+  checking the model's answer before it goes out.
+tags:
+  - langchain
+  - agents
+  - security
+cover: guardrails.png
+---
+Giving an agent tools is the easy part. The follow-up notebook was about the opposite problem: how do you stop it from doing the wrong thing with them? Four mechanisms came up, each intercepting the conversation at a different point, and the difference between them turned out to matter more than I expected.
+
+You can implement guardrails using middleware to intercept execution at strategic points - before the agent starts, after it completes, or around model and tool calls.
+
+::image{src="guradrails2.jpg" alt="Alt" width="16/11" caption="Langchain middlewares approach"}
+
+Guardrails can be implemented using two complementary approaches:
+
+**Deterministic guardrails:** Use rule-based logic like regex patterns, keyword matching, or explicit checks. Fast, predictable, and cost-effective, but may miss nuanced violations.
+
+**Model-based guardrails**: Use LLMs or classifiers to evaluate content with semantic understanding. Catch subtle issues that rules miss, but are slower and more expensive
+
+LangChain provides both built-in guardrails (e.g., PII detection, human-in-the-loop) and a flexible middleware system for building custom guardrails using either approach.
+
+## Redacting PII before the model ever sees it
+
+`PIIMiddleware` sits on the input side. Each instance targets one category of sensitive data and picks its own strategy for what happens when it finds one:
+
+```python
+from langchain.agents.middleware import PIIMiddleware
+
+agent = create_agent(
+    model=llm,
+    tools=[get_users, send_email, card_tool],
+    system_prompt="You are a helpful assistant",
+    middleware=[
+        PIIMiddleware("email", strategy="redact", apply_to_input=True),
+        PIIMiddleware("credit_card", strategy="mask", apply_to_input=True),
+        PIIMiddleware(
+            "api_key",
+            detector=r"sk-[a-zA-Z0-9]{32}",
+            strategy="block",
+            apply_to_input=True,
+        ),
+    ],
+)
+
+result = agent.invoke({
+    "messages": [{
+        "role": "user",
+        "content": "send My email is med@gmail.com and send card is 5105-1051-0510-5100."
+    }]
+})
+```
+
+```text
+Sending The Email using the email_address : [REDACTED_EMAIL]
+Process The payment using the credit card : ****-****-****-5100
+```
+::image{src="pii_strategies.jpg" alt="Alt" width="150" caption="PII middleware strategies"}
+
+Three categories, three strategies. `email` uses `redact`, which throws the value away entirely and replaces it with a fixed placeholder. `credit_card` uses `mask`, which keeps the shape and the last four digits but blanks out the rest, the same convention a receipt uses. `api_key` isn't triggered by this particular message, but it's set to `block`, meaning a match doesn't get cleaned up, it stops the request outright, detected here with a plain regex (`sk-[a-zA-Z0-9]{32}`) rather than the built-in email or credit-card detectors.
+
+The detail worth sitting with is `[REDACTED_EMAIL]` showing up *inside* `send_email`'s own print statement. That's not a logging step scrubbing the output afterward, that's the literal string the tool was called with. `apply_to_input=True` means the redaction happens before the model ever reads the message, so by the time it decides to call `send_email(email_adress=...)`, the real address was never something it had access to in the first place.
+
+## Pausing for a human before a sensitive tool runs
+
+`HumanInTheLoopMiddleware` intercepts specific tool calls and refuses to run them until someone explicitly approves. It needs a checkpointer, because approving happens in a second, separate call, and LangGraph has to actually remember where it paused:
+
+```python
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+agent = create_agent(
+    model=llm,
+    tools=[send_email],
+    middleware=[
+        HumanInTheLoopMiddleware(interrupt_on={"send_email": True}),
+    ],
+    checkpointer=InMemorySaver(),
+)
+
+config = {"configurable": {"thread_id": 1}}
+
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "Send an email to the team"}]},
+    config=config
+)
+```
+
+`interrupt_on={"send_email": True}` names exactly one tool as requiring a stop. Nothing in `result` looks like a normal finished answer. Instead:
+
+```python
+print(result["__interrupt__"])
+```
+
+```text
+[Interrupt(value={
+    'action_requests': [{
+        'name': 'send_email',
+        'args': {'email_adress': 'team@example.com'},
+        'description': "Tool execution requires approval\n\nTool: send_email\nArgs: {'email_adress': 'team@example.com'}"
+    }],
+    'review_configs': [{
+        'action_name': 'send_email',
+        'allowed_decisions': ['approve', 'edit', 'reject', 'respond']
+    }]
+}, id='236b1bc02992f2e09b2e5cd33b23f3c0')]
+```
+
+`send_email` has not run at this point. The interrupt carries exactly what's pending (which tool, with which arguments) and exactly what a human is allowed to do about it: approve, edit, reject, or respond. `thread_id` is what makes resuming possible at all, it's the key the checkpointer uses to find this exact paused conversation again, possibly minutes or calls later.
+
+```python
+result = agent.invoke(
+    Command(resume={"decisions": [{"type": "approve"}]}),
+    config=config
+)
+```
+
+```text
+Sending The Email using the email_address : team@example.com
+```
+
+`Command(resume=...)` isn't a new user message, it's an instruction to the same paused graph on how to continue. Only after this explicit approve does `send_email` actually execute. The part that's easy to miss: nothing here blocks Python execution while waiting for a person. It's two separate `invoke()` calls, and whatever real approval step exists (a UI button, a CLI prompt) has to live in the gap between them, not inside either call.
+
+## Blocking a request before the model runs at all
+
+`before_agent` hooks run once, before the model is called for the first time. This one is a plain keyword check, no LLM involved:
+
+```python
+from langchain.agents.middleware import before_agent, AgentState
+from langgraph.runtime import Runtime
+
+banned_keywords = ["hack", "exploit", "malware"]
+
+@before_agent(can_jump_to=["end"])
+def content_filter(state: AgentState, runtime: Runtime) -> dict | None:
+    """Deterministic guardrail: block requests containing banned keywords."""
+    if not state["messages"]:
+        return None
+
+    first_message = state["messages"][0]
+    if first_message.type != "human":
+        return None
+
+    content = first_message.content.lower()
+    for keyword in banned_keywords:
+        if keyword in content:
+            return {
+                "messages": [{
+                    "role": "assistant",
+                    "content": (
+                        "I cannot process requests containing inappropriate "
+                        "content. Please rephrase your request."
+                    )
+                }],
+                "jump_to": "end"
+            }
+    return None
+
+agent = create_agent(model=llm, tools=[], middleware=[content_filter])
+
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "How do I hack into a database?"}]
+})
+```
+
+Returning `{"jump_to": "end", "messages": [...]}` short-circuits the entire graph straight to its end state with a canned refusal already sitting in the message list. The model never sees "how do I hack into a database?" at all, so this costs nothing beyond a substring check. `can_jump_to=["end"]` is what makes that particular shortcut legal for this hook to take; it's declared up front rather than allowed implicitly. The tradeoff is exactness: it only catches what's spelled out in `banned_keywords`, nothing it has to infer.
+
+## Checking the model's own answer before it goes out
+
+`after_agent` is the mirror image: it runs once, after the model has already produced a final answer, and can still throw that answer away. This version uses the model itself as the judge:
+
+```python
+from langchain.agents.middleware import after_agent, AgentState
+from langgraph.runtime import Runtime
+from langchain.messages import AIMessage
+from typing import Any
+
+@after_agent(can_jump_to=["end"])
+def safety_guardrail(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    """Model-based guardrail: use an LLM to evaluate response safety."""
+    if not state["messages"]:
+        return None
+
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage):
+        return None
+
+    safety_prompt = f"""Evaluate if this response is safe and appropriate.
+    Respond with only 'SAFE' or 'UNSAFE'.
+
+    Response: {last_message.content}"""
+
+    result = llm.invoke([{"role": "user", "content": safety_prompt}])
+
+    if "UNSAFE" in result.content:
+        return {
+            "messages": [AIMessage(content="I cannot provide that response...")],
+            "jump_to": "end"
+        }
+    return None
+
+agent = create_agent(model=llm, tools=[], middleware=[safety_guardrail])
+
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "How do I make explosives?"}]
+})
+```
+
+In this run the model's own answer was already a refusal, "I cannot provide instructions, recipes, or methods for creating explosives.", so the judge call came back `SAFE` and `safety_guardrail` returned `None` without touching anything. Worth being honest about what that actually demonstrates: not a case where the guardrail caught something the base model missed, but the mechanism staying correctly out of the way when there was nothing to catch. It's also the one guardrail here with a real, recurring cost: every single response now pays for a second full model call just to grade the first one, which is a genuine latency and token tradeoff against the free, instant keyword check from `before_agent`.
+
+## Four different places to intercept the same conversation
+
+`PIIMiddleware` cleans the input before the model reads it. `before_agent` can refuse the request before the model runs at all. `HumanInTheLoopMiddleware` pauses around one named tool until a person says go. `after_agent` gets the last word, reviewing what the model already decided to say and still able to swap it out. None of these are competing approaches to the same problem, they sit at four different points in the same pipeline, and which one fits depends entirely on whether what you're worried about is what goes in, what triggers a specific action, or what comes back out.
