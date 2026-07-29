@@ -4,6 +4,7 @@ import path from "node:path";
 import { imageSize } from "image-size";
 
 import { requireApiSession } from "@/lib/auth";
+import { isReadOnlyFsError, READ_ONLY_FS_MESSAGE, READ_ONLY_FS_REASON } from "@/lib/fs-error";
 import {
   ALLOWED_IMAGE_EXTENSIONS,
   MAX_IMAGE_BYTES,
@@ -60,7 +61,11 @@ export async function POST(request: Request) {
     await fs.promises.mkdir(directory, { recursive: true });
   } catch (error) {
     return Response.json(
-      { error: `Could not create the image folder: ${(error as Error).message}` },
+      {
+        error: isReadOnlyFsError(error)
+          ? READ_ONLY_FS_MESSAGE
+          : `Could not create the image folder: ${(error as Error).message}`,
+      },
       { status: 500 },
     );
   }
@@ -104,13 +109,9 @@ export async function POST(request: Request) {
       await fs.promises.writeFile(path.join(directory, finalName), bytes);
       saved.push(finalName);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
       rejected.push({
         name: file.name,
-        reason:
-          code === "EROFS" || code === "EACCES" || code === "EPERM"
-            ? "The filesystem is read-only."
-            : (error as Error).message,
+        reason: isReadOnlyFsError(error) ? READ_ONLY_FS_REASON : (error as Error).message,
       });
     }
   }

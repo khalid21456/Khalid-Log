@@ -1,6 +1,7 @@
 import { revalidatePath } from "next/cache";
 
 import { requireApiSession } from "@/lib/auth";
+import { isReadOnlyFsError, READ_ONLY_FS_MESSAGE } from "@/lib/fs-error";
 import { listRawPosts, postExists, readRawPost, writeRawPost } from "@/lib/post-file";
 import { invalidatePostCache } from "@/lib/posts";
 import { isValidSlug } from "@/lib/slug";
@@ -98,16 +99,8 @@ export async function POST(request: Request) {
       body,
     });
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-
-    if (code === "EROFS" || code === "EACCES" || code === "EPERM") {
-      return Response.json(
-        {
-          error:
-            "The filesystem is read-only, so the post could not be saved. Publishing from the browser needs a host with a writable, persistent disk.",
-        },
-        { status: 500 },
-      );
+    if (isReadOnlyFsError(error)) {
+      return Response.json({ error: READ_ONLY_FS_MESSAGE }, { status: 500 });
     }
 
     return Response.json(
