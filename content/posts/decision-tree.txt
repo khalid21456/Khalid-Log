@@ -9,7 +9,7 @@ tags:
   - decision-trees
   - machine-learning
   - python
-cover: guardrails.png
+cover: cover.png
 ---
 
 
