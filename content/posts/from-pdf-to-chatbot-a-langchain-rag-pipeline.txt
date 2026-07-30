@@ -1,0 +1,249 @@
+---
+title: 'From PDF to chatbot: a LangChain RAG pipeline'
+date: '2026-07-30'
+excerpt: >-
+  Building a PDF-backed RAG pipeline in a notebook, grading its own answers with
+  a second model, then wiring it into FastAPI.
+tags:
+  - fastapi
+  - rag
+  - openai
+  - python
+  - vectorstore
+cover: rag_cover.png
+---
+The RAG notebook started as five separate ideas, load a PDF, chunk it, embed it, search it, constrain the model to only answer from what it found, that only became a real feature once each piece got wired into an actual FastAPI endpoint.
+
+## Loading and chunking a PDF for retrieval
+
+`PyPDFDirectoryLoader` reads *AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation*'s article.  `RecursiveCharacterTextSplitter.from_tiktoken_encoder` then cuts the extracted text into pieces sized by actual token count, not character count, which matters because the embedding model and the LLM both bill and truncate in tokens.
+
+```python
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+
+loader = PyPDFDirectoryLoader(path="./pdfs")
+
+text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+    encoding_name='cl100k_base',
+    chunk_size=512,
+    chunk_overlap=16
+)
+
+chunks = loader.load_and_split(text_splitter)
+```
+
+::image{src="chunking.jpg" width="300px"}
+
+`chunk_overlap=16` means consecutive chunks share their last 16 tokens with the next chunk's first 16, so a sentence that happens to land right on a chunk boundary doesn't lose its own context on either side.
+
+## Turning chunks into a searchable index
+
+::image{src="chunking2.jpg" width="500px"}
+
+Each chunk gets embedded into a vector, and Chroma stores those vectors so they can be searched by similarity instead of by keyword.
+
+```python
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+
+embedding_model = OpenAIEmbeddings(model='text-embedding-ada-002')
+
+vectorstore = Chroma.from_documents(
+    chunks,
+    embedding_model,
+    collection_name="Auto_gen_framework"
+)
+
+retriever = vectorstore.as_retriever(
+    search_type='similarity',
+    search_kwargs={'k': 5}
+)
+```
+
+
+```python
+quert = "What is Autogen ?"
+retriever.invoke(query)
+```
+
+`retriever.invoke(query)` doesn't touch the LLM at all, it's pure vector search: embed the query with the same model, return the `k` closest chunks. Asking "What is Autogen ?" against a paper about a multi-agent framework returned exactly 5 chunks similar to the input user (here we talk about vector similarity because the input user will be embedded and compared to other embeddings in the vectorstore).
+
+## Constraining the model to only answer from context
+
+This is the actual "**retrieval-augmented**" part: the retrieved chunks get joined into one block of text and stuffed into a prompt that explicitly tells the model where its allowed answer comes from.
+
+```python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="gpt-5-mini",
+)
+
+prompt_template = """
+Answer the following question based
+only on provided context
+The context is delimited by <context>
+tag
+The user question is delimited by
+<question> tag
+If the answer is not found in the
+context, answer : I DO NOT KNOW
+<context>
+{context}
+</context>
+<question>
+{question}
+</question>
+"""
+
+context_list = [d.page_content for d in retrieved_chunks]
+context_for_query = ". ".join(context_list)
+prompt = prompt_template.format(context=context_for_query, question=query)
+resp = llm.invoke(prompt)
+```
+
+"If the answer is not found in the context, answer: I DO NOT KNOW" is the whole guardrail. Nothing enforces it at the code level, it's an instruction the model is trusted to follow, which is worth remembering before treating any RAG system as airtight against making things up.
+
+## Wrapping it in one function
+
+Retrieval and generation are two separate calls up to this point. Bundling them into a single function is what makes the next question just `RAG("...")` instead of five lines every time.
+
+```python
+def RAG(query, llm=llm, prompt_template=prompt_template):
+    context_docs = retriever.invoke(query)
+    context_list = [d.page_content for d in context_docs]
+    context_for_query = ". ".join(context_list)
+    prompt = prompt_template.format(context=context_for_query, question=query)
+    resp = llm.invoke(prompt)
+    return resp.content
+
+response = RAG("What are the design patterns of autogen framework ?")
+```
+
+## Evaluation
+
+The idea is checking whether an answer actually came from the context, using a second LLM call as the judge instead of trusting the first one's own claim.
+
+```python
+groundedness_rater_system_message = """
+Vous êtes chargé d'évaluer des réponses générées par une IA à des questions
+posées par des utilisateurs.
+On vous présentera une question, le contexte utilisé par le système d'IA
+pour générer la réponse, ainsi qu'une réponse générée par l'IA à la question.
+Critères d'évaluation :
+La réponse doit être dérivée uniquement des informations présentées dans
+le contexte.
+Notez de 1 (pas respecté) à 5 (entièrement respecté).
+"""
+
+user_message_template = """
+###Question
+{question}
+###Context
+{context}
+###Answer
+{answer}
+"""
+
+def evaluate(system_message, user_message_template, question, model=llm):
+    retrieved_chunks = retriever.invoke(question)
+    context = ". ".join(d.page_content for d in retrieved_chunks)
+    answer = RAG(question)
+    prompt = f"""
+        {system_message}
+        USER:
+        {user_message_template.format(question=question, context=context, answer=answer)}
+    """
+    juge_response = model.invoke(prompt)
+    return juge_response.content
+```
+
+`evaluate()` runs the full RAG pipeline internally and then asks the same model to score its own output on a 1 to 5 scale for whether it stuck to the context, given the question, the retrieved context, and the answer as three separate labeled inputs. It's a small, cheap way to catch a RAG system quietly ignoring its own "I DO NOT KNOW" instruction, without needing a human to read every answer.
+
+## Turning the notebook into an endpoint
+
+None of the above becomes a feature until we wrap it all with a FastApi api to send responses and recieve requests, So I built Rag class which have all what the api need to generate the response, LLM, retreiver, vectorstore and the `generate_response()` function that do the real work, I recommand also to use a persistante vector database to persiste vetors without generating them every time the application starts.
+
+```python
+from pathlib import Path
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from dotenv.ipython import load_dotenv
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+
+load_dotenv(override=True)
+
+PDF_DIR = Path(__file__).resolve().parents[2] / "nootbooks" / "pdfs"
+
+class RAG():
+
+    llm = ChatOpenAI(model="gpt-5-mini")
+
+    loader = PyPDFDirectoryLoader(str(PDF_DIR))
+
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        encoding_name='cl100k_base',
+        chunk_size=512,
+        chunk_overlap=16
+    )
+
+    chunks = loader.load_and_split(text_splitter)
+
+    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+
+    vectorstore = Chroma.from_documents(
+        chunks,
+        embeddings,
+        collection_name="AutoGen"
+    )
+
+    retriever = vectorstore.as_retriever(
+        search_type='similarity',
+        search_kwargs={'k': 3}
+    )
+
+    prompt_template = """
+        Answer the following question based only on provided context
+        The context is delimited by <context> tag The user question is delimited by
+        <question> tag If the answer is not found in the
+        context, answer : I DO NOT KNOW
+        <context>{context}</context>
+        <question>{question}</question>
+        """
+
+    def genrate_response(self,query:str):
+        context_docs = self.retriever.invoke(query)
+        context_list = [d.page_content for d in context_docs]
+        context_for_query = ". ".join(context_list)
+        prompt = self.prompt_template.format(context=context_for_query, question=query)
+        resp = self.llm.invoke(prompt)
+        return resp.content
+```
+
+the chat() endpoint to receive the query and generate the response using `generate_response()` from `RAG` instance
+
+```python
+from fastapi import APIRouter
+
+from app.RAG.Rag import RAG
+
+router = APIRouter(prefix="/rag", tags=["rag"])
+
+rag = RAG()
+
+
+@router.get("/chat")
+def chat(query: str):
+    return {"response": rag.genrate_response(query)}
+```
+
+::image{src="rag_app.jpg" width="800px"}
+
+
+
+## Conclusion
+
+This blog demonstrates how a RAG pipeline comes together piece by piece before becoming a genuinely usable feature. Token-aware chunking, vector indexing with Chroma, and prompt-level context constraints work together to ground responses in retrieved documents rather than the model's general knowledge. However, the "I DO NOT KNOW" safeguard is purely instructional, nothing in the code actually enforces it, which is exactly why the groundedness evaluation step matters: using a second LLM call as judge is a cheap, practical way to catch silent hallucination before it reaches users. Wrapping the logic into a RAG class and exposing it through a FastAPI endpoint is what turns this from an experiment into an actual service. Recomputing embeddings on every application startup, as this code does, only works for prototyping; a production version would need a persisted vector store, incremental ingestion for new documents, and some form of logging to track groundedness scores over time. Overall, the technical skeleton here is solid and pedagogically clear, but real-world RAG robustness lives in exactly these operational details.

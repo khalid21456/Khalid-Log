@@ -140,7 +140,9 @@ The editor creates this folder for you when you save, and uploads land in it.
 
 ### Layout
 
-**MUST** — `width` is exactly one of three named layouts. It is **not a size**.
+`width` does one of two things, depending on what you give it.
+
+**A layout column** — one of three named keywords:
 
 | `width` | Renders at |
 |---|---|
@@ -148,9 +150,19 @@ The editor creates this folder for you when you save, and uploads land in it.
 | `wide` | Breaks out past the text, ~944px |
 | `full` | Full content width, ~1152px |
 
-**MUST NOT** — write `width="50px"`, `width="300"`, or `width="huge"`. Anything that is not `inline`, `wide` or `full` is **silently treated as `inline`** — the image will look untouched and you will not be told why.
+**An exact size** — anything else that looks like a size: `400`, `400px`, or `50%`. The image renders at exactly that width, centered, instead of stretching to fill its column:
 
-There is no way to set pixel dimensions from a post. To make an image smaller, resize the file itself before uploading.
+```markdown
+::image{src="logo.png" alt="Team logo" width="120px"}
+```
+
+**MUST NOT** — write `width="huge"` or another word that is neither a layout keyword nor a size — it is silently treated as `inline` at full column width.
+
+**Optional** — combine a layout column with an exact size using a separate `size` attribute, for a wide column with a smaller image centered inside it:
+
+```markdown
+::image{src="diagram.png" alt="…" width="wide" size="500px"}
+```
 
 **Optional** — `ratio` crops to a shape, and must be `N/N`:
 
@@ -318,7 +330,7 @@ A draft is visible with `npm run dev`, carries a banner on its page, and is **ex
 [ ] cover has a coverAlt
 [ ] Every image has real alt text — no placeholders
 [ ] No src contains "/public/"
-[ ] No width="50px" — only inline, wide or full
+[ ] width is a layout keyword or a real size — no stray words like "huge"
 [ ] The cover is not repeated as the first body image
 [ ] Every code fence declares a language
 [ ] Literal dollar signs are escaped as \$

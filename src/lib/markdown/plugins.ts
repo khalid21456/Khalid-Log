@@ -8,7 +8,7 @@ import type { Options } from "react-markdown";
 import type { Root } from "mdast";
 import { visit } from "unist-util-visit";
 
-import { normaliseImageWidth } from "@/lib/image-src";
+import { IMAGE_WIDTHS } from "@/lib/image-src";
 
 /**
  * The subset of hast fields remark-rehype reads off an mdast node.
@@ -76,11 +76,21 @@ export function remarkPostMedia() {
       const data = (directive.data ?? (directive.data = {})) as HastData;
 
       if (directive.name === "image") {
+        // `width` picks a layout column ("inline"/"wide"/"full"). Anything
+        // else — "400", "400px", "50%" — is an explicit rendered size instead,
+        // so `width="400px"` (the natural thing to try) works without a
+        // separate attribute. An explicit `size` attribute wins if both are
+        // given (e.g. `width="wide" size="500px"`: a wide column, smaller image).
+        const rawWidth = (attributes.width ?? "").trim();
+        const isLayoutKeyword = (IMAGE_WIDTHS as readonly string[]).includes(rawWidth);
+
         data.hName = "figure";
         data.hProperties = {
           "data-image": attributes.src ?? "",
           "data-alt": attributes.alt ?? "",
-          "data-width": normaliseImageWidth(attributes.width),
+          "data-width": isLayoutKeyword ? rawWidth : "inline",
+          ...(!isLayoutKeyword && rawWidth ? { "data-size": rawWidth } : {}),
+          ...(attributes.size ? { "data-size": attributes.size } : {}),
           ...(attributes.caption ? { "data-caption": attributes.caption } : {}),
           ...(attributes.ratio ? { "data-ratio": attributes.ratio } : {}),
         };

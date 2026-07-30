@@ -2,7 +2,7 @@ import { Children, type CSSProperties, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 
 import { CodeBlock } from "@/components/blog/CodeBlock";
-import { normaliseImageWidth, normaliseRatio, type ImageWidth } from "@/lib/image-src";
+import { normaliseImageWidth, normaliseRatio, normaliseSize, type ImageWidth } from "@/lib/image-src";
 
 export type FigureSpec = {
   /** As written by the author — a bare filename, absolute path or URL. */
@@ -10,6 +10,8 @@ export type FigureSpec = {
   alt: string;
   caption: ReactNode | null;
   width: ImageWidth;
+  /** An explicit rendered size ("400px", "50%"), or null to fill the column. */
+  size: string | null;
   ratio: string | null;
 };
 
@@ -65,6 +67,7 @@ export function createMarkdownComponents(renderers: MarkdownRenderers): Componen
         // and markdown titles supply one via the attribute.
         caption: captionText ?? meaningfulChildren(children),
         width: normaliseImageWidth(dataAttribute(rest, "data-width")),
+        size: normaliseSize(dataAttribute(rest, "data-size")),
         ratio: normaliseRatio(dataAttribute(rest, "data-ratio")),
       });
     },

@@ -1,5 +1,5 @@
 import Image from "next/image";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { getImageMeta } from "@/lib/images";
 import { isExternalSrc, resolveImageSrc, type ImageWidth } from "@/lib/image-src";
@@ -22,11 +22,23 @@ type Props = {
   alt: string;
   caption?: ReactNode | null;
   width?: ImageWidth;
+  /** An explicit rendered size ("400px", "50%"). Centers instead of stretching. */
+  size?: string | null;
   ratio?: string | null;
   /** Render just the image — used for images sitting inline among text. */
   bare?: boolean;
   priority?: boolean;
 };
+
+/** Inline style for the frame: an explicit size, a crop ratio, or both. */
+function frameStyle(size: string | null, ratio: string | null): CSSProperties | undefined {
+  if (!size && !ratio) return undefined;
+
+  return {
+    ...(ratio ? { aspectRatio: ratio } : {}),
+    ...(size ? { width: size, maxWidth: "100%", marginInline: "auto" } : {}),
+  };
+}
 
 /**
  * A post-body image, rendered server-side.
@@ -42,6 +54,7 @@ export function PostImage({
   alt,
   caption = null,
   width = "inline",
+  size = null,
   ratio = null,
   bare = false,
   priority = false,
@@ -60,7 +73,9 @@ export function PostImage({
 
     return (
       <figure className="pb-figure" data-width={width}>
-        <div className="pb-frame">{remote}</div>
+        <div className="pb-frame" style={frameStyle(size, null)}>
+          {remote}
+        </div>
         {caption ? <figcaption>{caption}</figcaption> : null}
       </figure>
     );
@@ -83,7 +98,10 @@ export function PostImage({
       alt={alt}
       width={meta.width}
       height={meta.height}
-      sizes={SIZES[width]}
+      // A pixel size is an exact display width, so request exactly that
+      // rather than the whole column — otherwise a 400px image would still
+      // pull down a file sized for a 944px slot.
+      sizes={size?.endsWith("px") ? size : SIZES[width]}
       priority={priority}
     />
   );
@@ -92,10 +110,7 @@ export function PostImage({
 
   return (
     <figure className="pb-figure" data-width={width}>
-      <div
-        className="pb-frame"
-        {...(ratio ? { "data-crop": "", style: { aspectRatio: ratio } } : {})}
-      >
+      <div className="pb-frame" data-crop={ratio ? "" : undefined} style={frameStyle(size, ratio)}>
         {image}
       </div>
       {caption ? <figcaption>{caption}</figcaption> : null}

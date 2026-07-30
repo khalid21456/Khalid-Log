@@ -870,6 +870,8 @@ $$`}
 
 ::image{src="hero.png" alt="Alt" width="full" caption="Edge to edge"}
 
+::image{src="hero.png" alt="Alt" width="400px"}
+
 :::image{src="hero.png" width="wide"}
 Caption with **markdown**
 :::
@@ -880,9 +882,14 @@ Caption with **markdown**
 :::`}
           </pre>
           <p>
-            <code className="t-code">width</code> is <code className="t-code">inline</code> (default),{" "}
-            <code className="t-code">wide</code> or <code className="t-code">full</code>. Add{" "}
-            <code className="t-code">ratio=&quot;16/9&quot;</code> to crop.
+            <code className="t-code">width</code> is a layout column —{" "}
+            <code className="t-code">inline</code> (default), <code className="t-code">wide</code> or{" "}
+            <code className="t-code">full</code> — or an exact size, like{" "}
+            <code className="t-code">400px</code> or <code className="t-code">50%</code>: the image
+            renders at that size, centered, instead of filling the column. Combine both with a
+            separate <code className="t-code">size=&quot;400px&quot;</code> attribute for a wide column
+            with a smaller image inside it. Add <code className="t-code">ratio=&quot;16/9&quot;</code>{" "}
+            to crop.
           </p>
         </div>
       </details>

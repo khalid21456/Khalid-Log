@@ -19,6 +19,31 @@ export function normaliseImageWidth(value: string | null | undefined): ImageWidt
   return IMAGE_WIDTHS.includes(value as ImageWidth) ? (value as ImageWidth) : "inline";
 }
 
+/**
+ * An explicit rendered size for an image — `400`, `400px` or `50%` — as
+ * opposed to `width`, which only picks a layout column (see `ImageWidth`).
+ * When set, the image renders at exactly this size, centered, instead of
+ * stretching to fill its column.
+ */
+export function normaliseSize(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+
+  const pixels = /^(\d+(?:\.\d+)?)(px)?$/i.exec(trimmed);
+  if (pixels) {
+    const n = Number(pixels[1]);
+    if (n > 0) return `${Math.round(Math.min(n, 4000))}px`;
+  }
+
+  const percent = /^(\d+(?:\.\d+)?)%$/.exec(trimmed);
+  if (percent) {
+    const n = Number(percent[1]);
+    if (n > 0 && n <= 100) return `${n}%`;
+  }
+
+  return null;
+}
+
 /** A CSS aspect-ratio like `16/9`, or null if the value is not one. */
 export function normaliseRatio(value: string | null | undefined): string | null {
   if (!value) return null;
