@@ -1,0 +1,306 @@
+---
+title: 'Nodes, edges, and the loop that makes an agent an agent !'
+date: '2026-08-01'
+excerpt: >-
+  Working through LangGraph's own primitives, state, nodes, conditional edges,
+  and cycles, before wiring them into a tool-calling agent that chains its own
+  tool calls.
+tags:
+  - langgraph
+  - agents
+  - python
+  - vectorstore
+cover: cover.jpg
+---
+Every agent so far had come from `create_agent`, a wrapper that hides the graph underneath it. This blog went the other way: build the graph by hand, state, nodes, edges, and see that a "conditional edge" is just a function returning a key, and a "loop" is just an edge pointing backward.
+
+## A graph's state is just a TypedDict
+
+The smallest possible graph is one node that reads the state and returns an update to it.
+
+```python
+from typing import TypedDict
+from langchain_core.messages import AnyMessage, AIMessage
+
+class State(TypedDict):
+    messages: list[AnyMessage]
+    counter: int
+
+def node(state: State):
+    messages = state['messages']
+    new_message = AIMessage("Hello")
+    return {"messages": messages + [new_message], "counter": 10}
+```
+
+`node` doesn't mutate `state`, it returns a dict of the fields to update, which LangGraph merges into the running state. Wiring it up is three calls: add the node, connect `START` to it, connect it to `END`.
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+workflow = StateGraph(State)
+workflow.add_node("node1", node)
+workflow.add_edge(START, "node1")
+workflow.add_edge("node1", END)
+
+graph = workflow.compile()
+```
+::image{src="output.png" alt="" width="150px"}
+
+
+## Running the graph and reading the result
+
+`graph.invoke(...)` takes an initial state and returns the final one, a single dict, not a stream of intermediate ones.
+
+```python
+from langchain_core.messages import HumanMessage
+
+result = graph.invoke({"messages": [HumanMessage("Hi")]})
+```
+
+```text
+{'messages': [HumanMessage(content='Hi', ...),
+              AIMessage(content='Hello', ...)],
+ 'counter': 10}
+```
+
+`result["messages"]` is a plain list, so printing the conversation is a plain loop over it.
+
+```python
+for message in result["messages"]:
+    message.pretty_print()
+```
+
+```text
+================================ Human Message =================================
+
+Hi
+================================== Ai Message ==================================
+
+Hello
+```
+
+## Branching on a condition
+
+A conditional edge is a function that looks at the state and returns the name of whichever edge should fire next, nothing more exotic than that.
+
+```python
+from typing import Literal
+
+class EmployeeState(TypedDict):
+    name: str
+    age: int
+    salary: float
+    decision: Literal["standard_hr", "forced_hr"]
+    result: str
+
+def analyze_employee(state: EmployeeState) -> EmployeeState:
+    if state['age'] <= 30 and state['salary'] <= 40000:
+        state['decision'] = "standard_hr"
+    else:
+        state['decision'] = "forced_hr"
+    return state
+
+# Route1
+def forced_HR_validation(state:EmployeeState):
+    state['result'] = f"""Demande de {state['name']} envoyée à la validation RH forcée"""
+    return state
+
+# Route2
+def standard_hr_process(state:EmployeeState):
+    state['result'] = f"""Demande de {state['name']} envoyée au traitement RH standard"""
+    return state
+
+def router(state: EmployeeState):
+    return state['decision']
+```
+
+The routing rule itself is exactly this condition:
+
+$$
+\text{decision} =
+\begin{cases}
+\text{standard\_hr} & \text{if } \text{age} \le 30 \text{ and } \text{salary} \le 40000 \\
+\text{forced\_hr} & \text{otherwise}
+\end{cases}
+$$
+
+`add_conditional_edges` maps the string `router` returns to an actual node:
+
+```python
+wf = StateGraph(EmployeeState)
+wf.add_node("analyze", analyze_employee)
+wf.add_node("standard", standard_hr_process)
+wf.add_node("forced", forced_HR_validation)
+wf.add_edge(START, "analyze")
+wf.add_conditional_edges(
+    "analyze",
+    router, {
+        "standard_hr": "standard",
+        "forced_hr": "forced"
+    }
+)
+graph = wf.compile()
+```
+::image{src="output2.png" alt="" width="300px"}
+
+
+Running it with age 55 and salary 200000 fails both conditions of the "forced" branch, so it falls to `forced_hr`, exactly as the formula above predicts:
+
+```text
+{'name': 'Mohamed', 'age': 55, 'salary': 200000,
+ 'decision': 'forced_hr',
+ 'result': 'Demande de Mohamed envoyée à la validation RH forcée'}
+```
+
+## Turning an edge into a loop
+
+Nothing about LangGraph's edges is one-directional by nature, an edge pointing from a later node back to an earlier one is a loop, and that's the entire mechanism behind retrying something until a condition clears.
+
+```python
+class AdministrativeFileState(TypedDict):
+    name: str
+    remaining_documents: int
+    reminders: int
+    status: Literal["incomplete", "complete", "validated"]
+
+def verify_employee_file(state: AdministrativeFileState):
+    state['status'] = 'incomplete' if state['remaining_documents'] > 0 else 'complete'
+    return state
+
+def notify_employee(state: AdministrativeFileState):
+    state['reminders'] += 1
+    if state['remaining_documents'] > 0:
+        state['remaining_documents'] -= 1
+    return state
+
+def router(state: AdministrativeFileState) -> Literal['notify', 'validate']:
+    return "notify" if state['status'] == 'incomplete' else "validate"
+
+wf2 = StateGraph(AdministrativeFileState)
+wf2.add_node("verify", verify_employee_file)
+wf2.add_node("employee_notification", notify_employee)
+wf2.add_node("employee_validation", validate_file)
+wf2.add_edge(START, "verify")
+wf2.add_edge("employee_notification", "verify")
+wf2.add_conditional_edges(
+    "verify",
+    router,
+    {"notify": "employee_notification", "validate": "employee_validation"}
+)
+
+graph = wf2.compile()
+res = graph.invoke({
+    "name":"Khalid", "remaining_documents":4, "reminders":0
+})
+```
+
+`add_edge("employee_notification", "verify")` is the loop: every notification sends control back to `verify`, which decides whether to notify again or move on. The remaining-documents count over successive notifications is exactly the recurrence
+
+$$
+d_{i+1} = \max(d_i - 1,\ 0), \qquad d_0 = 4
+$$
+
+and running it with `remaining_documents=4` produces exactly four notifications before the status flips to `complete` and the loop exits to validation:
+
+::image{src="result.jpg" alt="" width="400px"}
+
+
+## Building a ReAct loop by hand
+
+A tool-calling agent turns out to be the exact same loop shape as the reminder example above, just with an LLM instead of a document counter deciding when to stop.
+
+```python
+from typing import Annotated, List, TypedDict
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.prebuilt import ToolNode
+from langgraph.graph.message import add_messages
+from langchain.tools import tool
+from langchain_core.messages import BaseMessage, SystemMessage
+
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+
+@tool
+def add(a: float, b: float) -> float:
+    """Add two float numbers"""
+    return a + b
+
+@tool
+def divide(a: float, b: float) -> float:
+    """Divide two float numbers"""
+    return a / b
+
+@tool
+def multiply(a: float, b: float) -> float:
+    """Multiply two float numbers"""
+    return a * b
+
+tools = [add, multiply, divide]
+llm_with_tools = ChatGoogleGenerativeAI(
+    model="gemini-flash-lite-latest", temperature=0
+).bind_tools(tools=tools)
+```
+
+The node that calls the model, and the router that decides whether to keep going:
+
+```python
+def assistant(state: AgentState) -> AgentState:
+    system_message = SystemMessage("Answer the user question using provided tools")
+    response = llm_with_tools.invoke([system_message] + state['messages'])
+    return {"messages": [response]}
+
+def should_continue(state: AgentState):
+    last_message = state['messages'][-1]
+    return "continue" if last_message.tool_calls else "end"
+
+wf3 = StateGraph(AgentState)
+wf3.add_node("agent", assistant)
+wf3.add_node("tools", ToolNode(tools))
+wf3.add_edge(START, "agent")
+wf3.add_conditional_edges(
+    "agent",
+    should_continue, {"continue": "tools", "end": END}
+)
+wf3.add_edge("tools", "agent")
+```
+
+::image{src="output3.png" alt="" width="300px"}
+
+
+`ToolNode(tools)` is LangGraph's own prebuilt node, it reads the `tool_calls` off the last message, runs the matching tool, and wraps the result as a `ToolMessage` automatically. `add_edge("tools", "agent")` is the loop: every tool result goes back to the model, which decides whether it has enough to answer or needs another tool call.
+
+Asking it to "add 6 to 7 then divide by 2 and multiply by 5" produced exactly three chained tool calls, one feeding the next:
+
+```python
+graph = wf3.compile()
+resp=graph.invoke(
+input={
+    "messages":[
+        HumanMessage(
+            """Compute this expression :
+                Add 6 to 7 then divide by 2 and multiply by 5.
+                Puis donne moi un proverbe"""
+        )
+    ]
+}
+)
+```
+
+```text
+Adding 2 numbers a=6.0, b=7.0
+Dividing 2 numbers a=13.0, b=2.0
+Multiplying 2 numbers a=6.5, b=5.0
+```
+A second, larger expression, "add 5 to 80 then divide by 2 and multiply by 35", chained the same three tools with different numbers:
+
+```text
+Adding 2 numbers a=80.0, b=5.0
+Dividing 2 numbers a=85.0, b=2.0
+Multiplying 2 numbers a=42.5, b=35.0
+```
+
+Neither answer was hardcoded anywhere, the model decided, on its own, which tool to call, in which order, and fed each result into the next call until nothing was left to compute.
+
+## Conclusion
+
+State is a dict, a node is a function that returns an update to it, a conditional edge is a function that returns a key, and a loop is just an edge that happens to point backward. The ReAct agent at the end isn't a fourth concept, it's the second and third ideas composed: the model itself plays the role of the router, deciding on every pass whether the loop back to `tools` should fire again or whether it's time to stop.
