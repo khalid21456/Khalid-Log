@@ -1,0 +1,335 @@
+---
+title: 'Agentic RAG: letting the model decide when to search'
+date: '2026-08-02'
+excerpt: >-
+  The difference between plain RAG and agentic RAG is one line of behavior, one
+  always retrieves, the other is a tool the model can choose to call or skip
+tags:
+  - rag
+  - langgraph
+  - langchain
+  - python
+  - agents
+cover: cover_agentic_rag.png
+---
+Every RAG setup so far retrieved unconditionally, call the function, retrieval happens, no exceptions. This blog changed exactly one thing: retrieval became a tool sitting next to the model, something it could call if the question needed it, or skip entirely if it didn't. That one change is the whole definition of "agentic" here.
+## Setting up the document pipeline
+
+First step is create loader at a PDF, then define how it gets cut into pieces.
+
+```python
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+
+path = "./pdfs/VEFA.pdf"
+file = PyPDFLoader(path)
+
+text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+    encoding_name='cl100k_base',
+    chunk_size=400,
+    chunk_overlap=16
+)
+
+chunks = file.load_and_split(text_splitter)
+```
+
+The embedding model, the LLM, the vector store, and the retriever come next:
+
+```python
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Chroma
+
+embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-flash-lite-latest",
+    temperature=1,
+    max_tokens=1000,
+    timeout=30
+)
+
+vectorstore = Chroma.from_documents(chunks, embedding_model, collection_name="VEFA")
+
+retriever = vectorstore.as_retriever(search_kwargs={'k': 3}, search_type="similarity")
+```
+
+## A prompt template and a plain RAG function
+
+Before anything agentic, we should create a prompt based on "answer only from context" pattern as the earlier RAG Blog, one prompt template, one function.
+
+```python
+prompt_template = """
+Answer the following question based
+only on provided context
+The context is delimited by <context>
+tag
+The user question is delimited by
+<question> tag
+If the answer is not found in the
+context, answer : I DO NOT KNOW
+<context>
+{context}
+</context>
+<question>
+{question}
+</question>
+"""
+
+def RAG(query, llm=llm, prompt_template=prompt_template):
+    context_docs = retriever.invoke(query)
+    context_list = [d.page_content for d in context_docs]
+    context_for_query = ". ".join(context_list)
+    prompt = prompt_template.format(context=context_for_query, question=query)
+    resp = llm.invoke(prompt)
+    return resp.content
+```
+
+Calling it is two lines, set the query, print the answer, and printing needs the same content-block indexing seen throughout this project, `[0]["text"]`, since Gemini's `.content` is a list, not a string.
+
+```python
+query = "What is VEFA"
+print(display(Markdown(RAG(query)[0]["text"])))
+```
+
+::image{src="output4.jpg" alt="" width="800px"}
+
+
+## Looking at what actually got retrieved
+
+Separate from the RAG function, the code pulls the raw retrieved chunks on their own, to actually look at what the retriever considered relevant.
+
+```python
+chunks_retreived = retriever.invoke(query)
+print(f"\n Retrieved {len(chunks_retreived)} relevant chunks:\n")
+
+for i, doc in enumerate(chunks_retreived[:3], 1):
+    print(f"Result {i}:")
+    print(f" Source: {doc.metadata.get('source', 'Unknown')}")
+    print(f" Page: {doc.metadata.get('page', 'Unknown')}")
+    print(f" Content: {doc.page_content[:100]}...")
+```
+
+::image{src="retreiver.jpg" alt="" width="700px"}
+
+
+`k=3` means the three closest vectors, not three different sections. A broad question like "what is X" tends to score highest against the document's own opening definition, so with a 400-token chunk size and only 16 tokens of overlap, several adjacent, overlapping slices of that same opening paragraph can all outrank chunks from anywhere else in the PDF.
+
+## Turning retrieval into something the model can choose
+
+This is the actual pivot of the our subject: the same `retriever.invoke(query)` call from above, wrapped in a `@tool` with a docstring the model reads before deciding whether to call it.
+
+```python
+from langchain.tools import tool
+
+@tool
+def retriever_tool(query: str) -> str:
+    """ Query the private database of legal documents on VEFA (Vente en l'État Futur d'Achèvement).
+    This RAG-powered tool searches documents related to Law 107-12 on VEFA,
+    covering the reservation contract, the sale contract, guarantees, the payment schedule, and construction phases.
+    Use this tool when you need information about:
+    - Law 107-12 and the legal framework governing VEFA
+    - The reservation contract and the VEFA sale contract
+    - The guarantees and obligations of the developer and the buyer
+    - The payment schedule and the construction phases
+    Args:
+        query: Natural language query about VEFA
+            (e.g., "What is VEFA?",
+            "What guarantees does the reservation contract provide?",
+            "What is the payment schedule under VEFA?")
+    Returns:
+        str: Detailed answer grounded in the VEFA legal documents with source citations
+    """
+    try:
+        # Retrieve relevant document chunks
+        relevant_document_chunks = retriever.invoke(query)
+        context_list = [d.page_content for d in relevant_document_chunks]
+        context_for_query = ". ".join(context_list)
+        return context_for_query
+    except Exception as e:
+        return f"Error querying private database: {str(e)}"
+```
+
+Binding it to a fresh model instance is what actually makes it callable:
+
+```python
+tools = [retriever_tool]
+model = ChatGoogleGenerativeAI(
+    model="gemini-flash-lite-latest",
+    temperature=1,
+    max_tokens=1000,
+    timeout=30
+)
+model_with_tools = model.bind_tools(tools)
+```
+
+Nothing here forces a retrieval to happen. `bind_tools` just makes the tool available; whether it gets called is a decision the model makes per question, based on that docstring.
+
+## State, logging, and a system message
+
+Before the graph can be built, we sets up logging, a state shape, and the instructions the agent will follow.
+
+```python
+import logging
+from typing import Annotated, Sequence, Literal, TypedDict
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from langchain.messages import SystemMessage, HumanMessage, AIMessage
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+class SimpleAgentState(TypedDict):
+    messages: Annotated[Sequence, add_messages]
+```
+
+And the system message :
+
+```python
+agentic_rag_system_message = """
+You are an assistant specialized in reviewing VEFA
+(Vente en l'État Futur d'Achèvement) legal documentation
+and providing accurate answers grounded in the context provided.
+The data provided by the user will include all the
+context needed to answer their question.
+The context contains references to Law 107-12 on VEFA,
+reservation contracts, sale contracts, guarantees, or
+payment schedules relevant to the user's query.
+Answer only using the provided context.
+Do not add external information and do not mention
+the context in your answer.
+Always cite which article, section, or contract
+the information comes from.
+If the answer cannot be found in the context,
+answer with: "I don't know - this information is not
+available in the VEFA documentation."
+"""
+```
+
+## An agent node that decides, and logs its decision
+
+The node that actually calls the model logs both which path it's taking and, if it calls a tool, which one.
+
+```python
+def agent_node(state: SimpleAgentState) -> dict:
+    """Agent node that calls the LLM with system prompt and current state."""
+    logger.info("AGENT NODE: Processing request...")
+    system_msg = SystemMessage(content=agentic_rag_system_message)
+    messages = [system_msg] + list(state["messages"])
+    logger.info("Calling LLM with tools...")
+    response = model_with_tools.invoke(messages)
+    if hasattr(response, 'tool_calls') and response.tool_calls:
+        logger.info(f"Agent decided to use {len(response.tool_calls)} tool(s)")
+        for i, tool_call in enumerate(response.tool_calls, 1):
+            logger.info(f" {i}. {tool_call['name']}")
+    else:
+        logger.info("Agent generated final response (no tools needed)")
+    return {"messages": [response]}
+```
+
+The router reads the same `tool_calls` field to decide where the graph goes next, and logs which way it routed:
+
+```python
+def should_continue(state: SimpleAgentState) -> Literal["tools", "end"]:
+    """Determines whether to continue to tools or end."""
+    last_message = state["messages"][-1]
+    if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        logger.info("ROUTING: Continuing to TOOLS node")
+        return "tools"
+    logger.info("ROUTING: Ending workflow (final response ready)")
+    return "end"
+```
+
+The only new part compared to earlier conditional edges is that the state it's inspecting was produced by an LLM's own judgment call, not a plain if condition.
+
+## Executing exactly the tool call the model asked for
+
+This node used to pass the entire graph state straight into the tool, `retriever_tool.invoke(state)`, it reads the actual tool call off the last message and invokes the matching tool by name with its own arguments.
+
+```python
+tools_by_name = {t.name: t for t in tools}
+from langchain_core.messages import ToolMessage
+
+def tool_node_with_logging(state):
+    logger.info("TOOL NODE: Executing tools...")
+    last_message = state["messages"][-1]
+    tool_messages = []
+    for tool_call in last_message.tool_calls:
+        tool = tools_by_name[tool_call["name"]]
+        logger.info(f" Calling tool: {tool_call['name']} with args {tool_call['args']}")
+        result = tool.invoke(tool_call["args"])
+        tool_messages.append(
+            ToolMessage(content=result, tool_call_id=tool_call["id"])
+        )
+    logger.info("Tools executed successfully")
+    return {"messages": tool_messages}
+```
+
+`tool_call["args"]` is what the model itself decided to pass in, extracted from its own response, not something hardcoded by this function.
+
+## Wiring agent and tools into a loop
+
+The graph itself is small, an agent node, a tools node, and an edge sending tool results back to the agent.
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+graph = StateGraph(SimpleAgentState)
+graph.add_node("agent", agent_node)
+graph.add_node("tools_node", tool_node_with_logging)
+graph.add_edge(START, "agent")
+graph.add_edge("tools_node", "agent")
+graph.add_conditional_edges(
+    "agent",
+    should_continue, {
+        "tools": "tools_node",
+        "end": END
+    }
+)
+```
+
+Compiling it turns the builder into something runnable, and the notebook renders it as an actual diagram to sanity-check the wiring before running anything through it.
+
+```python
+from IPython.display import Image, display
+
+workflow = graph.compile()
+display(Image(workflow.get_graph().draw_mermaid_png()))
+```
+
+::image{src="agentic_rag.png" alt="" width="300px"}
+
+
+## Watching the agent decide, live
+
+The final cell runs a real question through the compiled graph and prints everything, the query, the routing decisions, and the answer.
+
+```python
+print("="*80)
+print("TEST 5: Enhanced Agent with RAG - VEFA Legal Documentation")
+print("="*80 + "\n")
+query = "What is VEFA ?"
+print(f"Query: {query}\n")
+print("-"*80 + "\n")
+result = workflow.invoke(
+{"messages": [HumanMessage(content=query)]}
+)
+print("\n🤖 ENHANCED AGENT RESPONSE (with RAG):")
+print("="*80)
+print(display(Markdown(result["messages"][-1].text)))
+print("\n" + "="*80)
+```
+
+The logging from every function above shows up in order, and it's the clearest possible demonstration of what "agentic" actually buys over plain RAG:
+
+::image{src="logs.jpg" alt="" width="900px"}
+
+
+First pass: the model reads the question, decides on its own that it needs `retriever_tool`, and calls it with `{'query': 'What is VEFA?'}`, its own rephrasing of the question, not a copy-paste of the input. The tool runs, its result goes back into the conversation, and on the second pass the model finds it already has enough to answer and stops asking for tools. `result["messages"][-1].text` instead of `.content` is what actually renders correctly here too, same reason as everywhere else in this project, Gemini's content comes back as a list of blocks, not a plain string.
+
+## Conclusion
+
+Plain RAG and agentic RAG run the exact same retriever underneath, the difference is entirely about who decides when it fires. Plain RAG's `RAG(query)` function calls `retriever.invoke(query)` unconditionally, every single time, whether the question needs a document lookup or not. Wrapping that same call in a `@tool` and handing it to a model with `bind_tools` turns retrieval into a decision instead of a step, and the trace above is that decision actually happening, not assumed.
