@@ -13,6 +13,10 @@ tags:
 cover: cover_agentic_rag.png
 ---
 Every RAG setup so far retrieved unconditionally, call the function, retrieval happens, no exceptions. This blog changed exactly one thing: retrieval became a tool sitting next to the model, something it could call if the question needed it, or skip entirely if it didn't. That one change is the whole definition of "agentic" here.
+
+::image{src="agentic_rag_sequence.jpg" alt="" width="700px"}
+
+
 ## Setting up the document pipeline
 
 First step is create loader at a PDF, then define how it gets cut into pieces.
