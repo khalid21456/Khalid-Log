@@ -398,9 +398,12 @@ export function Editor({ email, today }: { email: string; today: string }) {
           </span>
         </Link>
 
-        <span className="h-5 w-px shrink-0 bg-hairline" aria-hidden="true" />
+        <span className="hidden h-5 w-px shrink-0 bg-hairline sm:block" aria-hidden="true" />
 
-        <nav aria-label="Breadcrumb" className="flex shrink-0 items-center gap-1.5 whitespace-nowrap t-caption">
+        <nav
+          aria-label="Breadcrumb"
+          className="hidden shrink-0 items-center gap-1.5 whitespace-nowrap t-caption sm:flex"
+        >
           <span className="text-muted">Admin</span>
           <span className="text-muted-soft">/</span>
           <span className="font-medium text-ink">Write</span>
@@ -408,15 +411,23 @@ export function Editor({ email, today }: { email: string; today: string }) {
 
         <div className="flex-1" />
 
-        <span className="shrink-0 whitespace-nowrap t-caption text-muted-soft">
+        {/* Hidden below sm: the button label ("Saving…") already carries this
+            information, and header space is scarce on a phone. */}
+        <span className="hidden shrink-0 whitespace-nowrap t-caption text-muted-soft sm:inline">
           {saved ? "All changes saved" : "Unsaved changes"}
         </span>
 
+        {/* Short/long label pair (rather than shrinking Button's own padding)
+            so "Save" always stays reachable without horizontal scrolling. */}
         <Button variant="secondary" onClick={startNewPost} className="shrink-0">
-          New post
+          <span className="hidden sm:inline">New post</span>
+          <span className="sm:hidden">New</span>
         </Button>
         <Button onClick={save} disabled={!canSave || busy !== "idle"} className="shrink-0">
-          {busy === "saving" ? "Saving…" : existing ? "Update post" : "Save post"}
+          <span className="hidden sm:inline">
+            {busy === "saving" ? "Saving…" : existing ? "Update post" : "Save post"}
+          </span>
+          <span className="sm:hidden">{busy === "saving" ? "Saving…" : existing ? "Update" : "Save"}</span>
         </Button>
 
         <span className="h-5 w-px shrink-0 bg-hairline" aria-hidden="true" />
@@ -550,13 +561,13 @@ export function Editor({ email, today }: { email: string; today: string }) {
                 value={form.body}
                 onChange={(event) => update("body", event.target.value)}
                 spellCheck
-                className="min-h-[65vh] w-full resize-none bg-canvas p-6 t-code leading-[1.85] text-ink placeholder:text-muted-soft focus:outline-none sm:px-10"
+                className="min-h-[45vh] w-full resize-none bg-canvas p-6 t-code leading-[1.85] text-ink placeholder:text-muted-soft focus:outline-none sm:min-h-[65vh] sm:px-10"
                 placeholder={STARTER_BODY}
               />
             ) : null}
 
             {view !== "write" ? (
-              <div className="min-h-[65vh] min-w-0 overflow-y-auto bg-canvas p-6 sm:px-10">
+              <div className="min-h-[45vh] min-w-0 overflow-y-auto bg-canvas p-6 sm:min-h-[65vh] sm:px-10">
                 {form.body.trim() === "" ? (
                   <p className="t-body-sm text-muted">Nothing to preview yet.</p>
                 ) : (
@@ -567,9 +578,13 @@ export function Editor({ email, today }: { email: string; today: string }) {
           </div>
 
           <div className="flex h-[34px] shrink-0 items-center gap-3.5 border-t border-hairline bg-surface-soft px-6 t-caption text-muted-soft sm:px-10">
-            <span className="truncate t-code">content/posts/{form.slug || "untitled"}.txt</span>
-            <div className="flex-1" />
-            <span className="shrink-0 whitespace-nowrap">Markdown · LaTeX · ::image</span>
+            {/* min-w-0 is load-bearing: without it, a flex child can't shrink
+                below its content's intrinsic width, so `truncate` never
+                engages and a long slug can push the row into overflow. */}
+            <span className="min-w-0 flex-1 truncate t-code">
+              content/posts/{form.slug || "untitled"}.txt
+            </span>
+            <span className="hidden shrink-0 whitespace-nowrap sm:inline">Markdown · LaTeX · ::image</span>
           </div>
         </section>
 
