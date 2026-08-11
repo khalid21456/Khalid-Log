@@ -1,0 +1,107 @@
+---
+title: I built an app with n8n as the entire backend
+date: '2026-08-11'
+excerpt: >-
+  A Flask form, four Postgres tables, and an AI agent with a SQL tool  most of
+  this app's logic lives inside n8n workflows, not in my code.
+tags:
+  - n8n
+  - automation
+  - python
+  - agents
+cover: n8n_cover.jpg
+coverAlt: >-
+  A chat page asking for the names of BDIOT students, with the bot replying with
+  two names it pulled live from Postgres.
+---
+I set out to build a small student registration app, the kind of thing you'd normally scaffold with a router, a couple of models, and a migration. Instead I ended up writing almost none of that. The form is Flask. The validation is client-side JavaScript and a Pydantic model. Everything that actually *decides* something where a student's row goes, whether they're admitted, how a chatbot answers a question about who's enrolled happens inside n8n. Flask just holds the door open.
+
+## Why hand the backend to a workflow tool
+
+The honest answer is curiosity. I wanted to see how far "no backend code" could actually go for something with real business rules — not a toy CRUD demo, but a form with per-program admission thresholds, a read path that has to reassemble data from several tables, and a chatbot that needs to answer questions grounded in that same data. If n8n could carry all three without me writing a single SQL query by hand, that would say something.
+
+## A form that gets checked twice
+
+The registration page is the one place with any real client-side logic: live validation on age, average, and baccalaureate year before the browser ever bothers the network.
+
+::image{src="form-page.png" alt="The registration form filled in with a sample student's last name, first name, age, sex, program, baccalaureate year, and average." width="900px" caption="Age, average, and bac year are range-checked live, in the browser, before anything is sent anywhere."}
+
+That's a courtesy for the user, not a security boundary. The same shape gets re-validated server-side with a Pydantic model before it's ever forwarded to n8n, so a disabled-JavaScript submission or a hand-crafted request can't sneak through:
+
+```python
+class Etudiant(BaseModel):
+    nom: str = Field(min_length=1)
+    age: int = Field(ge=15, le=100)
+    sex: Sex
+    filiere: Filiere
+    annee_obtention_bac: int = Field(ge=1980, le=date.today().year)
+    moyenne: float = Field(ge=0, le=20)
+```
+
+Once that passes, Flask's job is done. It POSTs the validated payload to an n8n webhook and waits.
+
+## Where the real decisions happen
+
+This is the part that surprised me most. I expected to write the admission logic myself check the program, check the average, pick a table. Instead it's a Switch node routing by program into three parallel If checks, each with its own bar to clear, before an Insert node lands the row in the right place.
+
+::image{src="form_workflow.png" alt="The n8n editor showing the registration workflow: a webhook feeding Extract Body, Edit Fields, and a Filter node into a Switch that branches by program, each branch gated by an If node checking the student's average before inserting into that program's table or into failed_students." width="900px" caption="IDMS asks for a 16, BDIOT a 15, IT a 14 — miss the bar for your program and you land in failed_students instead."}
+
+Three different admission thresholds, three different destination tables, and a fourth table for the students who don't clear their bar all encoded as branches in a canvas, with no code of mine involved. And this isn't a diagram I drew for the blog; it's the workflow as published, and here's it actually running:
+
+::image{src="registration-n8n.png" alt="The n8n Executions tab for the published Form workflow, showing a run that succeeded in 402 milliseconds with every node along the branching path highlighted green." width="900px" caption="Not a mockup — a real execution, 402ms end to end, every branch node lit up green."}
+
+## Four tables, and one of them is for rejects
+
+Back on the Flask side, a successful submission gets a plain confirmation page Flask's other remaining job, alongside collecting the form, is just to say "you're in" and show what was saved.
+
+::image{src="registration_successful.png" alt="The Flask confirmation page after submitting the form, showing a green checkmark, a success message, and a summary table with the student's last name, first name, age, sex, program, baccalaureate year, and average." width="900px"}
+
+Meanwhile, over in Supabase, the Switch-and-Insert logic has quietly built out exactly the tables that workflow implied:
+
+::image{src="tables-supabase.png" alt="The Supabase table browser sidebar listing four tables: BDIOT_students, IDMS_students, IT_students, and failed_students." width="300px" caption="One table per program, plus the one nobody wants their name added to."}
+
+No migration file anywhere in this project defines those tables. They exist because an n8n Insert node pointed at them.
+
+## Getting the list back out: three selects, one merge
+
+Listing students meant reversing the split: three tables to read, one list to show. I half expected to reach for a Postgres view or a UNION query. Instead, the `/students` page just calls a GET webhook and lets a second workflow do the reassembly.
+
+::image{src="fetch-data-workflow.png" alt="The n8n editor showing the get_data workflow: a GET webhook fanning out into three parallel Postgres Select nodes, one per program table, joined back together by a Merge node set to append." width="900px" caption="Three Select nodes in parallel, one Merge node set to append, and the three tables are one list again."}
+
+Same story as before this isn't just wired up, it's live:
+
+::image{src="students-n8n.png" alt="The n8n Executions tab for the get_data workflow, showing a successful run where the webhook fans out to three Postgres select nodes returning one item each, merged into two items total." width="900px"}
+
+Flask receives that merged array, validates each row through a `StudentRecord` model (catching anything malformed instead of crashing the page), and renders it with a filter for program:
+
+::image{src="students_page.png" alt="The Flask student list page with All, BDIOT, IDMS, and IT filter tabs above a table of students showing their program, average, and registration timestamp." width="900px" caption="Same rows, three tables reassembled by n8n before Flask ever runs a query."}
+
+## The chatbot: guardrails, memory, and a SQL tool instead of a vector store
+
+The last page is a chatbot, and it's the one place where "n8n as the backend" stopped feeling like a novelty and started feeling like a legitimately good idea. The contract with Flask is deliberately tiny: send `chatInput`, get back `output`.
+
+```python
+@app.route("/chat/send", methods=["POST"])
+def chat_send():
+    message = request.get_json()["message"]
+    response = requests.post(
+        N8N_WEBHOOK_CHAT, json={"chatInput": message}, timeout=30
+    )
+    return jsonify({"reply": response.json()[0]["output"]})
+```
+
+Everything past that line the actual conversation is n8n's problem. A Guardrails node screens the incoming text before it ever reaches a model; only a pass continues to the AI Agent, and a fail routes straight to a "Stop and Error" node instead. The agent itself is wired to an OpenAI chat model, short-term memory, and this is the detail I like most a plain Postgres node as its retrieval tool.
+
+::image{src="chatbot-workflow.png" alt="The n8n editor showing the chat workflow: a POST webhook into a Guardrails node checking text for violations, passing into an AI Agent wired to an OpenAI chat model, simple memory, and a Postgres tool for selecting rows from the student tables." width="900px" caption="No vector database in sight — the agent's only retrieval tool is a live SQL select against the same tables the form writes to."}
+
+That's retrieval-augmented generation without an embedding in sight: the "retrieval" is a SQL query the agent decides to run, against data that's always current because it's the same tables the registration workflow just wrote to. Here's that exact workflow completing a real run in just over seven seconds:
+
+::image{src="chatbot-n8n.png" alt="The n8n Executions tab for the published chat workflow, showing a run that succeeded in 7.227 seconds with the Guardrails check passing and the AI Agent's model, memory, and Postgres tool all completing." width="900px"}
+
+And on the other end, in the browser, it's exactly as boring as a good tool should be: ask "What are the names of BDIOT students?" and it comes back a moment later with two real names, pulled live from the same `BDIOT_students` table the registration workflow writes to the cover of this post is that exact exchange.
+
+## What's left for Flask to do
+
+Not much, and that's the point. Three routes render a template, one route validates a payload with Pydantic before relaying it, and one route relays a chat message. No ORM, no migrations, no query I wrote by hand the schema, the admission rules, the multi-table read, and the tool-using agent all live in three n8n workflows.
+
+That comes with a real gotcha worth naming: n8n's test webhook URLs only fire once per "Listen for test event" click, which means a page that "worked five minutes ago" can silently stop responding the moment you close the editor tab. Every workflow here had to be activated and pointed at its production URL before it could be trusted to just keep running. It's a small tax for how much logic I got to skip writing.
