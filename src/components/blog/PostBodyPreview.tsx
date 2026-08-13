@@ -11,7 +11,7 @@ import {
   type InlineImageSpec,
 } from "@/components/blog/markdown-components";
 import { resolveImageSrc } from "@/lib/image-src";
-import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown/plugins";
+import { markdownRehypePlugins, markdownRemarkPlugins, sanitizeMarkdown } from "@/lib/markdown/plugins";
 
 /**
  * The editor's live preview.
@@ -61,7 +61,7 @@ export function PostBodyPreview({ slug, body }: { slug: string; body: string }) 
         rehypePlugins={markdownRehypePlugins}
         components={components}
       >
-        {body}
+        {sanitizeMarkdown(body)}
       </Markdown>
     </div>
   );

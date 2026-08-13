@@ -6,7 +6,7 @@ import "katex/dist/katex.min.css";
 
 import { createMarkdownComponents } from "@/components/blog/markdown-components";
 import { PostImage } from "@/components/blog/PostImage";
-import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown/plugins";
+import { markdownRehypePlugins, markdownRemarkPlugins, sanitizeMarkdown } from "@/lib/markdown/plugins";
 
 /**
  * Renders a post's markdown body — server-side, so images can be measured on
@@ -29,7 +29,7 @@ export function PostBody({ slug, body }: { slug: string; body: string }) {
         rehypePlugins={markdownRehypePlugins}
         components={components}
       >
-        {body}
+        {sanitizeMarkdown(body)}
       </Markdown>
     </div>
   );

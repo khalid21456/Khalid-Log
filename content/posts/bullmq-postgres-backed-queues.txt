@@ -1,0 +1,134 @@
+---
+title: A Postgres-backed job queue with BullMQ
+date: '2026-08-13'
+excerpt: >-
+  How I wired BullMQ into an Express API without Redis, using its experimental
+  Postgres backend, and what that trade-off actually costs.
+tags:
+  - bullmq
+  - postgres
+  - nodejs
+cover: postgres_bullmq.png
+---
+Most BullMQ tutorials start with a line you can't skip: install Redis. That's fine for a big system, but for a small Express API backed by a single Postgres database, adding a second stateful service just to queue a "send a welcome email" job felt like the wrong trade. BullMQ has an answer for that: an experimental backend that stores jobs as rows in Postgres instead of keys in Redis. Here's how I wired it into a real registration flow, and where the rough edges are.
+
+## Why a queue at all
+
+When a user registers, the request should return as soon as the user row exists not after every downstream side effect (welcome email, analytics event, whatever comes next) has finished. A queue is the seam between "the thing that must happen now" and "the thing that can happen a moment later": the HTTP handler writes a job and returns, and a separate worker process picks that job up on its own schedule.
+
+## BullMQ, minus Redis
+
+BullMQ's normal mode of operation leans on Redis for two things: storing job state, and `BZPOPMIN`/pub-sub for waking up an idle worker the instant a job arrives. The Postgres backend (`createPostgresBackend`) replaces both: jobs are rows in a `job` table, claiming a job uses `SELECT ... FOR UPDATE SKIP LOCKED`, and the wake-up signal comes from Postgres's own `LISTEN`/`NOTIFY` instead of Redis pub-sub. From the outside, the API — `Queue`, `Worker`, `.add()` is identical. Only the backend factory you pass in changes.
+
+## One connection, one file
+
+Every `Queue` and `Worker` in the app shares a single connection config:
+
+```typescript
+import { ConnectionOptions } from 'bullmq';
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is not set');
+}
+
+const connection = {
+  connectionString: process.env.DATABASE_URL,
+  migrate: true,
+} as unknown as ConnectionOptions;
+
+export default connection;
+```
+
+Two things here are easy to get wrong.
+
+First, `migrate: true`. The Postgres backend needs to create its own schema and tables the first time it runs, and it will only do that when `connection` is passed as a config object like the one above. Passing a bare connection string works for connecting, but silently skips the migration the backend then fails the moment it tries to query a table that was never created.
+
+Second, the `as unknown as ConnectionOptions` cast. BullMQ's `connection` option is typed as `ConnectionOptions`, which is a union of Redis client types it has no Postgres shape in it at all, even though the Postgres backend explicitly documents that `connection` can be a `pg` pool config. That's a gap in BullMQ's own type definitions, not a mistake in this code: the backend accepts the value correctly at runtime, TypeScript just can't see it. The cast is narrow and commented, which is the right way to carry a known type-level lie it says exactly what's being overridden and why, instead of silencing errors with a broader `any`.
+
+## The queue and the worker
+
+Both live in one file, since they always travel together a queue with nothing consuming it is just a table filling up:
+
+```typescript
+import { Queue, Worker, createPostgresBackend } from 'bullmq';
+import connection from '../../../config/bullmq';
+
+export const USER_QUEUE_NAME = 'user-events';
+
+export const userQueue = new Queue(
+  USER_QUEUE_NAME,
+  { connection },
+  createPostgresBackend,
+);
+
+export const createUserWorker = () =>
+  new Worker(
+    USER_QUEUE_NAME,
+    async job => {
+      switch (job.name) {
+        case 'user.registered': {
+          const { userId, email } = job.data;
+          console.log(`user.registered — ${userId} ${email}`);
+          break;
+        }
+      }
+    },
+    { connection },
+    createPostgresBackend,
+  );
+```
+
+`userQueue` is the producer: anything that imports it can call `.add(name, data)` to write a job. `createUserWorker` is a factory for the consumer a function, not an instance, because starting a worker means opening a dedicated `LISTEN` connection, and that should happen exactly once, deliberately, not as a side effect of importing a file.
+
+## Producing jobs from the service layer
+
+The job gets added right after the write it depends on, inside the service method not the controller:
+
+```typescript
+async register(dto: CreateUserDto): Promise<User> {
+  const existing = await this.userRepo.findByEmail(dto.email);
+  if (existing) throw new ConflictError('Email already used');
+
+  const hashed = await bcrypt.hash(dto.password, 10);
+  const user = await this.userRepo.create({ ...dto, password: hashed });
+
+  await this.userQueue.add('user.registered', {
+    userId: user.id,
+    email: user.email,
+  });
+
+  return user;
+}
+```
+
+## Boot and shutdown
+
+The worker starts once, when the app starts — not per request:
+
+```typescript
+const userWorker = createUserWorker();
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+
+process.on('SIGTERM', () => userWorker.close());
+process.on('SIGINT', () => userWorker.close());
+```
+
+Calling `.close()` on shutdown matters for a Postgres-backed worker specifically: it holds open both a query pool and a dedicated `LISTEN` client, and an unclean exit leaves those hanging until Postgres itself notices the connection died.
+
+## What actually happens on registration
+
+1. `POST /users/register` hits the controller, which calls `userService.register()`.
+2. The service creates the user row, then calls `userQueue.add('user.registered', { userId, email })` this is a normal `INSERT` into the backend's job table, committed before the HTTP response goes out.
+3. The already-running `Worker`, blocked on a Postgres `LISTEN` channel, wakes up on the `NOTIFY` fired by that insert and claims the job with `SELECT ... FOR UPDATE SKIP LOCKED`.
+4. The processor function runs, matches on `job.name`, and does its work.
+
+No polling loop, no Redis the same at-least-once delivery guarantee BullMQ always gives you, backed by whichever database the rest of the app already trusts.
+
+## Where this bites
+
+Running the worker in the same process as the HTTP server is the simplest possible setup, and also the one to outgrow first: a slow or crashing job handler shares the same event loop and the same restart as the API. It's a fine starting point, wrong for anything with real job volume.
+
+The processor also has no error handling of its own a thrown error inside the `switch` marks the job failed (BullMQ's default), but there's no retry policy, no dead-letter path, and no alerting configured yet. That's a deliberate gap, not an oversight: the plumbing was the first problem to solve, and it's easy to bolt failure handling on once there's an actual job worth protecting.

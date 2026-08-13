@@ -133,6 +133,34 @@ export function remarkPostMedia() {
 }
 
 /**
+ * Zero-width space/joiner and BOM characters, stripped before markdown ever
+ * sees the body.
+ *
+ * These are invisible in every editor and terminal, but a code fence line has
+ * to start with the backtick sequence itself — a leading zero-width space
+ * means the line no longer looks like a fence to the parser, so the whole
+ * block falls back to plain text (literal backticks, no highlighting). This
+ * is a known artifact of some AI writing tools, which insert a zero-width
+ * space before a nested ``` to stop it from being read as the *outer* fence
+ * closing early. Stripped here rather than only in the saved file, so a post
+ * added by hand (bypassing the editor's save path) still renders correctly.
+ */
+// Built from numeric code points rather than \u escapes in a literal or
+// regex: those have proven unreliable to author directly in this file (they
+// keep round-tripping back to either the raw character or a literal
+// backslash instead of a real escape), so this sidesteps the ambiguity
+// entirely — every character here is constructed, not typed.
+const ZERO_WIDTH_CODE_POINTS = [0x200b, 0x200c, 0x200d, 0xfeff];
+const ZERO_WIDTH_CHARACTERS = new RegExp(
+  `[${ZERO_WIDTH_CODE_POINTS.map((codePoint) => String.fromCharCode(codePoint)).join("")}]`,
+  "g",
+);
+
+export function sanitizeMarkdown(markdown: string): string {
+  return markdown.replace(ZERO_WIDTH_CHARACTERS, "");
+}
+
+/**
  * remark-gfm       — tables, strikethrough, task lists, autolinks
  * remark-math      — LaTeX: `$inline$` and `$$display$$`
  * remark-directive — the `::image` / `:::gallery` syntax

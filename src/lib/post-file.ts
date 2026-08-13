@@ -3,6 +3,7 @@ import fs from "node:fs";
 import matter from "gray-matter";
 
 import { postImageDir } from "@/lib/images";
+import { sanitizeMarkdown } from "@/lib/markdown/plugins";
 import { POST_EXTENSION, POSTS_DIR, postFilePath } from "@/lib/posts";
 import { isValidSlug } from "@/lib/slug";
 
@@ -122,7 +123,11 @@ export async function writeRawPost(post: RawPost): Promise<void> {
   if (post.coverAlt) frontmatter.coverAlt = post.coverAlt;
   if (post.draft) frontmatter.draft = true;
 
-  const file = matter.stringify(`${post.body.trim()}\n`, frontmatter);
+  // Cleans up zero-width characters some AI writing tools insert around code
+  // fences (see lib/markdown/plugins.ts) so a post saved through the editor
+  // never has to be fixed by hand afterward.
+  const body = sanitizeMarkdown(post.body).trim();
+  const file = matter.stringify(`${body}\n`, frontmatter);
 
   await fs.promises.mkdir(POSTS_DIR, { recursive: true });
   await fs.promises.writeFile(postFilePath(post.slug), file, "utf8");
