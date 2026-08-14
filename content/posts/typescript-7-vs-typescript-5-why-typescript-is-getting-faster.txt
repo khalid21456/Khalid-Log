@@ -10,10 +10,6 @@ tags:
   - javascript
   - compilers
 cover: typescript_cover.jpg
-coverAlt: >-
-  An illustration of a developer running while holding a laptop labeled TS, next
-  to the Go gopher mascot, under the heading "TypeScript 7.0: Smarter, Faster,
-  and Now Written in Go?"
 ---
 For most of its life, TypeScript's biggest selling point the compiler that checks your types has also been its biggest bottleneck. `tsc` is written in TypeScript, which means it runs as JavaScript, on Node, on V8. Every `interface`, every generic, every `.d.ts` file your editor has to load is walked by code that pays the same performance tax as the app you're writing. TypeScript 7 is the project's answer to that: not new syntax, not new type-system features, but a from-scratch compiler written in Go. Before getting into what changes, it's worth being precise about what the compiler actually does today because everything TypeScript 7 speeds up is a step in that same pipeline.
 
