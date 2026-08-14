@@ -129,6 +129,8 @@ No polling loop, no Redis the same at-least-once delivery guarantee BullMQ alway
 
 ## Where this bites
 
+::image{src="shema.png" alt="" width="inline"}
+
 Running the worker in the same process as the HTTP server is the simplest possible setup, and also the one to outgrow first: a slow or crashing job handler shares the same event loop and the same restart as the API. It's a fine starting point, wrong for anything with real job volume.
 
 The processor also has no error handling of its own a thrown error inside the `switch` marks the job failed (BullMQ's default), but there's no retry policy, no dead-letter path, and no alerting configured yet. That's a deliberate gap, not an oversight: the plumbing was the first problem to solve, and it's easy to bolt failure handling on once there's an actual job worth protecting.

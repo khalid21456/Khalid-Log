@@ -1,0 +1,139 @@
+---
+title: 'TypeScript 7 vs TypeScript 5: Why TypeScript Is Getting Faster'
+date: '2026-08-14'
+excerpt: >-
+  TypeScript's compiler has always been TypeScript, running on Node. The next
+  version rewrites it in Go same language, same types, a completely different
+  machine underneath.
+tags:
+  - typescript
+  - javascript
+  - compilers
+cover: typescript_cover.jpg
+coverAlt: >-
+  An illustration of a developer running while holding a laptop labeled TS, next
+  to the Go gopher mascot, under the heading "TypeScript 7.0: Smarter, Faster,
+  and Now Written in Go?"
+---
+For most of its life, TypeScript's biggest selling point the compiler that checks your types has also been its biggest bottleneck. `tsc` is written in TypeScript, which means it runs as JavaScript, on Node, on V8. Every `interface`, every generic, every `.d.ts` file your editor has to load is walked by code that pays the same performance tax as the app you're writing. TypeScript 7 is the project's answer to that: not new syntax, not new type-system features, but a from-scratch compiler written in Go. Before getting into what changes, it's worth being precise about what the compiler actually does today because everything TypeScript 7 speeds up is a step in that same pipeline.
+
+## How TypeScript works under the hood
+
+TypeScript's core trick is one sentence long: **types exist at compile time and are erased before your code ever runs.** Nothing about `string`, `number`, or an `interface` survives into the JavaScript that ships.
+
+::image{src="how_typescript_works.png" alt="Diagram titled 'How TypeScript Works Under the Hood', showing TypeScript source code with a type annotation flowing through the TypeScript compiler (tsc) into JavaScript output with the type annotation erased, then executed at runtime in a browser or Node.js." width="inline"}
+
+Concretely, `tsc` takes a file like this:
+
+```typescript
+function greet(name: string): string {
+  return `Hello ${name}`;
+}
+```
+
+and produces this:
+
+```javascript
+function greet(name) {
+  return `Hello ${name}`;
+}
+```
+
+`: string` appears twice in the source and zero times in the output. That's not an optimization it's the whole design. The compiler's actual job, in order, is:
+
+1. **Parse** the source into an AST, TypeScript syntax included.
+2. **Type-check** it resolve every `interface`, generic, and inferred type, and flag anything that doesn't fit.
+3. **Erase** the type-only syntax, leaving plain JavaScript.
+4. **Emit** that JavaScript, plus `.d.ts` declaration files if the project wants them.
+
+Step 2 is where TypeScript earns its keep, and it's also where the cost lives: type-checking a large codebase means resolving types across every imported module, often repeatedly, every time you save a file. Step 3 is comparatively cheap deleting syntax is fast. The slow part was never "turning TypeScript into JavaScript." It was "figuring out whether the TypeScript was even valid in the first place," and doing that fast enough for an editor to call it on every keystroke:
+
+```typescript
+let age: number = 24;
+```
+
+```javascript
+let age = "24"; // a plain JS runtime would just accept this
+```
+
+A JavaScript file has no way to reject that assignment; nothing checks it until something downstream breaks. TypeScript catches it at compile time, which only works because step 2 ran the type existed just long enough to do its job, then was thrown away in step 3.
+
+### Not everything gets erased
+
+"Types are erased" is the rule, but it has a well-known exception, and it's the detail that trips people up the first time they hit it: not everything that looks like TypeScript-only syntax is *purely* a type. `enum` is the clearest case. Unlike an `interface` or a `type` alias, a numeric enum compiles to a real object, built at runtime:
+
+```typescript
+enum Direction {
+  Up,
+  Down,
+}
+```
+
+```javascript
+var Direction;
+(function (Direction) {
+  Direction[(Direction["Up"] = 0)] = "Up";
+  Direction[(Direction["Down"] = 1)] = "Down";
+})(Direction || (Direction = {}));
+```
+
+That's not a type annotation being stripped in step 3 it's an object literally being constructed in step 4, with an immediately-invoked function so that `Direction.Up` gives you `0` and `Direction[0]` gives you back `"Up"`. Compare that to this, which is the same idea written as a type instead of an enum:
+
+```typescript
+type Direction = "Up" | "Down";
+
+function move(direction: Direction) {
+  // ...
+}
+```
+
+This version erases completely there's no `Direction` object anywhere in the compiled output, because a union of string literals is purely a compile-time constraint on what `move` accepts. Same modeling problem, two different answers to "does this exist at runtime," and the compiler has to know precisely which one it's looking at for every single construct in your program. That distinction erase this, keep that is the real contract TypeScript 7's Go compiler has to reproduce exactly. Getting it 10x faster is worthless if `enum` suddenly erases like `type` does somewhere along the way.
+
+## Where TypeScript 7 actually changes things
+
+Nothing above is different in TypeScript 7. The language, the type system, the four-step pipeline all the same. What changes is which program runs that pipeline.
+
+::image{src="typescript5_vs_typescript7.png" alt="Side-by-side diagram comparing TypeScript 5.x, whose compiler is itself written in TypeScript, against TypeScript 7, a native compiler written in Go, both compiling the same interface and producing the same JavaScript output but with TypeScript 7 promising much faster compilation and editor tooling." width="inline"}
+
+TypeScript 5.x's compiler is *self-hosted*: `tsc` is a TypeScript program, compiled down to JavaScript, run on Node. That's a genuinely unusual choice for a compiler most languages don't bootstrap their tooling in themselves this way and it's why editor features (autocomplete, "go to definition," inline errors) can feel like they're waiting on a queue: the language service doing that work is itself interpreted JavaScript, subject to garbage collection, V8 JIT warm-up, and single-threaded execution.
+
+TypeScript 7's compiler is a **native binary written in Go.** Same input language, same type-checking rules, same JavaScript output the AST, the type checker, the whole pipeline above, reimplemented in a language that compiles to machine code and gives Go's runtime real concurrency to work with. The public benchmarks the TypeScript team has shared put the difference at roughly an order of magnitude: about 10x faster full-project builds and type-checking, with editor operations like "find all references" landing that much snappier because the language service is running native code instead of interpreted JavaScript. (Check the official Microsoft blog [https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/](https://))
+
+Go specifically, rather than another native language, comes down to one structural detail: type-checking a large codebase is checking dozens or hundreds of largely-independent files, and Go's goroutines make running that work across multiple CPU cores a normal part of the language instead of a project on top of it. The self-hosted TypeScript checker runs on one thread by construction there's no equivalent in plain, single-threaded JavaScript. This isn't real project source, just the shape of the difference:
+
+```typescript
+// TypeScript 5.x one thread checks every file in sequence
+for (const file of program.getSourceFiles()) {
+  typeChecker.checkSourceFile(file);
+}
+```
+
+```go
+// TypeScript 7 files fan out across goroutines, one per CPU core
+var wg sync.WaitGroup
+for _, file := range program.SourceFiles() {
+    wg.Add(1)
+    go func(f *SourceFile) {
+        defer wg.Done()
+        checker.CheckSourceFile(f)
+    }(file)
+}
+wg.Wait()
+```
+
+Neither snippet is lifted from the actual compiler the real type checker has shared state between files that makes this genuinely hard to get right, which is a large part of why this is a full rewrite and not a patch. But it's the reason a language switch was even on the table: no amount of tuning turns a single JavaScript thread into four Go goroutines. Two things are worth being precise about too, since it's easy to overstate a rewrite like this:
+
+- **The language doesn't change.** Every `.ts` file that compiles today is meant to keep compiling the same way this is a new engine under an unchanged hood, not a new dialect of TypeScript.
+- **This is a preview, not a settled default.** Microsoft has been shipping it as the "TypeScript native preview" (sometimes called `tsgo` in the tooling itself) for teams to try against real codebases, with the intention of it becoming the shipping compiler not a finished, universal replacement yet.
+
+| | TypeScript 5.x | TypeScript 7 |
+|---|---|---|
+| Compiler implementation | TypeScript, running on Node | Go, compiled to a native binary |
+| Type-checking speed | Baseline | ~10x faster, per published benchmarks |
+| Editor responsiveness | Bounded by V8 + single-threaded JS | Native code, real concurrency |
+| Language & type system | Current TypeScript | Unchanged |
+| Status | Current stable compiler | Native preview, moving toward becoming the default |
+
+## Why a rewrite, and not just more optimization
+
+It's a fair question TypeScript's team has spent years optimizing the existing compiler, and it kept getting faster release over release. The honest answer, per the team's own framing, is that a self-hosted, single-threaded, JIT-warmed JavaScript program has a ceiling that tuning can't get past. Real concurrency, predictable native performance, and lower memory overhead aren't things you patch into an architecture they're things you get by choosing a different one. TypeScript 7 is that choice, made once, so the type-checking work every `interface` and generic already demanded doesn't have to keep paying JavaScript's own performance tax to get done.
