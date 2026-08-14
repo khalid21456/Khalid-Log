@@ -100,6 +100,8 @@ That's retrieval-augmented generation without an embedding in sight: the "retrie
 
 And on the other end, in the browser, it's exactly as boring as a good tool should be: ask "What are the names of BDIOT students?" and it comes back a moment later with two real names, pulled live from the same `BDIOT_students` table the registration workflow writes to the cover of this post is that exact exchange.
 
+::image{src="chatbot-page.png" alt="The n8n Executions tab for the published chat workflow, showing a run that succeeded in 7.227 seconds with the Guardrails check passing and the AI Agent's model, memory, and Postgres tool all completing." width="900px"}
+
 ## What's left for Flask to do
 
 Not much, and that's the point. Three routes render a template, one route validates a payload with Pydantic before relaying it, and one route relays a chat message. No ORM, no migrations, no query I wrote by hand the schema, the admission rules, the multi-table read, and the tool-using agent all live in three n8n workflows.
