@@ -1,0 +1,313 @@
+---
+title: Synchronous vs Asynchronous Programming
+date: '2026-08-20'
+excerpt: >-
+  The difference isn't about speed it's about what a process is allowed to do
+  while it's waiting for an answer.
+tags:
+  - programming
+  - concurrency
+  - javascript
+  - python
+cover: cover_async.png
+---
+**synchronous** and **asynchronous** get thrown around as if they're about speed async is the fast one, sync is the slow one. That's not actually the distinction. Both versions of a request can take exactly two seconds. The difference is what the calling process is *allowed to do* during those two seconds: nothing at all, or something else useful.
+
+## Synchronous: request, then wait
+
+In a synchronous call, Process A sends a request and stops until Process B replies. The arrow back is the only thing that lets Process A move again.
+
+::image{src="synchro.jpg" alt="A sequence diagram: Process A sends a Request to Process B and its lifeline stays active and blocked the entire time, with no other activity, until the Response arrow arrives back from Process B." width="300px" }
+
+This is the default, easiest-to-reason-about mode of just about every language, and it's why it's usually where people start:
+
+```python
+import time
+
+
+def fetch_data():
+    time.sleep(2)  # standing in for a slow network call
+    return "data"
+
+
+print("Start")
+result = fetch_data()
+print(result)
+print("End")
+```
+
+```text
+Start
+(a two second pause, during which this process does nothing)
+data
+End
+```
+
+Every line waits for the one before it. That's not a limitation of `time.sleep` specifically it's true of any blocking call: a database query, reading a file, an HTTP request made the ordinary way. The process is single-threaded and single-minded. It has exactly one thing in flight at a time, which is precisely why it's so easy to read top to bottom and know what happens when.
+
+## Asynchronous: request, then do something else
+
+An asynchronous call sends the same request, but Process A doesn't stop. It keeps working, and the response whenever it shows up  gets handled without Process A having sat idle waiting for it.
+
+::image{src="asynch.jpg" alt="The same sequence diagram as before, but between the Request and Response arrows, Process A's lifeline is labelled 'Continue working', showing it doing other work while waiting instead of being blocked." width="300px"}
+
+In JavaScript, that gap is exactly where the rest of your script gets to run:
+
+```javascript
+function fetchData() {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve("data"), 2000);
+  });
+}
+
+console.log("Start");
+fetchData().then((result) => console.log(result));
+console.log("End");
+```
+
+```text
+Start
+End
+(a two second pause)
+data
+```
+
+Notice `"End"` prints *before* `"data"`. `fetchData()` was called, but the line right after it didn't wait around for the promise to settle it just kept going, the same way Process A keeps working in the diagram. The response gets handled later, through `.then()`, whenever it actually arrives.
+
+`async`/`await` is the same mechanism wearing a synchronous-looking costume:
+
+```javascript
+async function run() {
+  console.log("Start");
+  const result = await fetchData();
+  console.log(result);
+  console.log("End");
+}
+
+run();
+console.log("This runs while run() is still waiting.");
+```
+
+```text
+Start
+This runs while run() is still waiting.
+data
+End
+```
+
+Reading `run()` top to bottom, it looks exactly like the synchronous version `await` even pauses *that function* at the request line. But it doesn't pause the program. The line after `run()` executes immediately, proving nothing outside that function was ever blocked. `await` only makes one function look sequential; it doesn't turn the whole process single-minded the way a truly synchronous call does.
+
+## Why this isn't free
+
+Non-blocking has a cost, and it's not CPU time it's that the order of operations stops being "top to bottom." The moment you introduce `.then()` or `await`, you're relying on something else an event loop, a scheduler, a runtime to remember to come back and run your callback once the response is ready. That bookkeeping is invisible right up until two async operations touch the same piece of state in an order you didn't expect, which is the class of bug synchronous code simply cannot produce: there's only ever one thing happening, so there's nothing to race against.
+
+## Picking one
+
+The honest rule is about what the wait is *for*, not which style feels more modern:
+
+- **I/O-bound waiting** a network call, a disk read, a database query, anything where the process is waiting on something outside itself is exactly the case asynchronous code is for. The process has nothing useful to do with that time except hand it to something else.
+- **CPU-bound work** parsing a large file, running a calculation, transforming data already in memory doesn't benefit from being async at all. There's no gap to fill; the process is genuinely busy the whole time, and wrapping busy work in a promise doesn't make the computation faster, it just adds scheduling overhead on top of it.
+
+A synchronous script that only ever does CPU-bound work loses nothing by being synchronous. An asynchronous server handling thousands of slow network requests loses everything by being synchronous it would spend nearly all its time standing still, one request at a time, exactly like Process A in that first diagram, multiplied by every client waiting in line behind it.
+
+
+## Event Loop
+### Node.js
+
+::image{src="node-logo.png" alt="" width="300px"}
+Node.js is a free, open-source, cross-platform javaScript runtime environment that lets developers create servers, web apps, command line tools and scripts, it's one of the most popular projects on github ([https://github.com/nodejs/node](https://github.com/nodejs/node)), it has a large community because it brings the idea of executing the javascript code outside the browser, and that results so many useful frameworks written in javascript like **Express.js** and **Electron**.
+
+This is a simple HTTP server written in Node.js runtime : 
+
+
+```javascript
+//server.mjs
+import { createServer } from 'node:http';
+
+const server = createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Hello World!\n');
+});
+
+// starts a simple http server locally on port 3000
+server.listen(3000, '127.0.0.1', () => {
+  console.log('Listening on 127.0.0.1:3000');
+});
+
+// run with `node server.mjs`
+```
+then Express come up as a lighweight unopinionated framework to build http servers on top of node.js in a few lines of code, this is http server using Express :
+
+
+```typescript
+const express = require('express');
+const app = express()
+const port = 3000
+
+app.get('/', (req, res) => {
+  res.send('Hello World!')
+})
+
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`)
+})
+});
+```
+**Notice**: as we said Express is an unopinionated framework, that means it does not provide a structure in your project to follow, you just install the package `express` and build you web application in your own way, and that can produce some **gaps** on your architecture, that's why I created a template express project with all what you need: **dependency injection**, **DTOs/validation**, a **repository layer**, **centralized error handling**, **background jobs** and more (check the repo [https://github.com/khalid21456/express-clean-architecture-template](https:github.com/khalid21456/express-clean-architecture-template//))
+
+Now we're going deep dive in Node.js architecture and see how it handles billions of requests in platforms such as **Linkedin** and **Slack** using **asynchronous architecture**.
+
+### Event Loop
+The event loop is what allows Node.js to perform **non-blocking I/O operations** despite the fact that a single JavaScript thread is used by default by offloading operations to the system kernel whenever possible.([source](https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick#what-is-the-event-loop))
+::image{src="event-loop.jpg" alt="" width="inline"}
+
+All this components together allow us to use asynchronous tasks in a non-blocking way in javascript.
+
+The **Call Stack** is where JavaScript keeps track of the functions that are currently executing. JavaScript executes code synchronously and one operation at a time on the main thread.
+
+The **Web APIs** are APIs provided by the environment running JavaScript, these APIs are not JavaScript itself. They are provided by the browser.
+
+For example : 
+
+```javascript
+setTimeout(() => {
+  console.log("Hello");
+}, 2000);
+```
+JavaScript asks the runtime to start a timer, the timer is handled outside the Call Stack. This allows JavaScript to continue executing other code instead of sitting there for two seconds.
+
+When an asynchronous operation finishes, its callback may be placed into a **task queue**.
+
+Consider : 
+```javascript
+console.log("A");
+
+setTimeout(() => {
+  console.log("B");
+}, 0);
+
+console.log("C");
+```
+The output is : 
+
+```text
+A
+C
+B
+```
+
+The **Microtask Queue** contains higher-priority asynchronous callbacks.
+The most important examples are: 
+
+
+```javascript
+Promise.then(...)
+Promise.catch(...)
+Promise.finally(...)
+queueMicrotask(...)
+new MutationObserver(...)
+
+async function aysnfunc() {
+  // Function body execution following await
+}
+
+```
+For example:
+```javascript
+console.log("A");
+
+Promise.resolve().then(() => {
+  console.log("B");
+});
+
+console.log("C");
+```
+Output:
+```text
+A
+C
+B
+```
+The Promise callback goes into the Microtask Queue.
+
+The **Event Loop** coordinates everything; it continuously checks whether JavaScript can execute more work, its simplified rule is: **When the Call Stack is empty, process microtasks before moving on to the next task.**
+
+For example : 
+
+```javascript
+setTimeout(() => {
+  console.log("timer");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("promise");
+});
+```
+
+The output is : 
+```text
+promise
+timer
+```
+because the Promise callback is a microtask, and microtasks are processed before the next task.
+
+Now let see how everything works together with expressing figures, let's take this example : 
+```javascript
+console.log("Start");
+
+setTimeout(() => {
+  console.log("Timer");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("Promise");
+});
+
+console.log("End");
+```
+
+::image{src="demo1.jpg" alt="" width="inline"}
+first we have `console.log("Start")`, so new execution context is created pushed into the call stack which then evaluated and logs **Start**.
+
+::image{src="demo2.jpg" alt="" width="inline"}
+Then we encounter a `setTimeout()`, this also get added to the call stack.
+
+::image{src="demo3.jpg" alt="" width="inline"}
+
+but all it does is register that callback and also the delay with timer's API and in the background the browser will actually handle this timer.
+
+::image{src="demo4.jpg" alt="" width="inline"}
+
+then we have `Promise.resolve()` added to the call stack.
+::image{src="demo5.jpg" alt="" width="inline"}
+and that creates new Promise object that's instantly resolved.
+::image{src="demo6.jpg" alt="" width="inline"}
+next we have `then()` handler, the promise is aleardy resolved so in the background it does create the promise reaction and the handler is immediately pushed to the microtask queue.
+::image{src="demo7.jpg" alt="" width="inline"}
+then we have `console.log("End")`, it pushed to the task queue and immediately get executed and logs `End`
+
+::image{src="demo8.jpg" alt="" width="inline"}
+
+::image{src="demo9.jpg" alt="" width="inline"}
+Then the call back from `setTimeout` is pushed out to the task queue.
+::image{src="demo10.jpg" alt="" width="inline"}
+The script is done our call stack is empty so the event loop checks the microtask queue, and there we have the promise handler callback it gets pushed and executed in the call stack and logs `Promise`.
+::image{src="demo11.jpg" alt="" width="inline"}
+::image{src="demo12.jpg" alt="" width="inline"}
+The event loop has to ensure that microtask queue is entirely empty before moving to the task queue, so the microtask is actually empty so the event loop graps the `setTimeout` call back from the task queue and logs `Timer`.
+::image{src="demo13.jpg" alt="" width="inline"}
+::image{src="demo14.jpg" alt="" width="inline"}
+So the final result is : 
+```text
+Start
+End
+Promise
+Timer
+```
+
+## Conclusion
+Understanding sync vs. async isn't about memorizing which keyword to type it's about knowing exactly what your process is doing during every second it's "waiting." That distinction is the difference between an engineer who ships code that works by luck and one who can explain why it works, and more importantly, why it sometimes doesn't.
+
+The event loop, the call stack, the microtask and task queues none of this is trivia. It's the actual machinery underneath every Express route, every database call, every "it randomly breaks in production" bug that only shows up under load. Engineers who skip this layer can still write code that runs, but they can't debug a race condition, reason about ordering guarantees, or explain to a teammate why a promise resolved before a timer fired.
+
+Real engineering ability isn't measured by how many frameworks you've used it's measured by how deep you're willing to go when the abstraction leaks. Frameworks like Express or Node.js exist to hide this complexity, not to make it irrelevant. The engineers worth trusting with hard problems are the ones who took the time to open the hood anyway.
