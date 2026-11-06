@@ -1,0 +1,160 @@
+---
+title: 'uv, uvicorn and pip are not the same kind of tool'
+date: '2026-11-06'
+excerpt: >-
+  Two of them install packages, one of them runs your web app. Here is where
+  each one fits in a Python project, and why the names keep getting mixed up.
+tags:
+  - python
+  - tools
+cover: modern-python-trio_-uv-uvicorn-pip.png
+---
+Three names show up in almost every modern Python tutorial: `uv`, `uvicorn` and `pip`. Two of them sound alike and one of them is everywhere, so it is easy to assume they compete. They do not. Two of them install things, and the third one runs things. This post sorts out which is which and how they fit together in a real project.
+
+## The short version
+
+If you only remember one table, make it this one.
+
+| Tool | Category | Job | Written in |
+|---|---|---|---|
+| `pip` | Package installer | Installs packages into an environment | Python |
+| `uv` | Project and package manager | Installs packages, manages envs, Python versions and lockfiles | Rust |
+| `uvicorn` | ASGI web server | Runs your FastAPI or Starlette app | Python |
+
+`pip` and `uv` live in the same box: they get code *onto* your machine. `uvicorn` lives in a completely different box: it *serves* code that is already installed.
+
+## Why the names are confusing
+
+The overlap is an accident of history. The "uv" in `uvicorn` comes from `uvloop`, a fast event loop built on `libuv`, the same C library behind Node.js. `uvicorn` was released years before `uv` existed.
+
+`uv` the package manager is made by Astral, the team behind the `ruff` linter. Its name is short because you type it a hundred times a day, not because it is related to `uvicorn`.
+
+> Same two letters, different authors, different problems. There is no shared code between them.
+
+## pip: the default installer
+
+`pip` ships with Python. It takes a package name, resolves its dependencies, downloads wheels from PyPI and installs them into whatever environment is currently active.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install fastapi
+pip freeze > requirements.txt
+```
+
+That is its whole scope, and it does it well. What it leaves to you:
+
+- Creating and activating the virtual environment (`venv`)
+- Picking and installing the Python version itself
+- Producing a reproducible lockfile (`pip freeze` is a snapshot, not a lock)
+- Separating direct dependencies from transitive ones
+
+Teams usually patch those gaps with `pip-tools`, `pyenv`, `pipx` and `virtualenv`. That works, but it is four tools glued together.
+
+## uv: one binary for the whole workflow
+
+`uv` is a single Rust binary that covers everything in the list above. It installs packages much faster than `pip` thanks to parallel downloads and a global cache, and it manages the project around those packages.
+
+```bash
+uv init my-api
+cd my-api
+uv add fastapi uvicorn
+uv run python main.py
+```
+
+Those four commands create a `pyproject.toml`, a `.venv`, and a `uv.lock` file, without you activating anything. `uv run` makes sure the environment matches the lockfile before it runs your command.
+
+It also handles the parts `pip` never touched:
+
+```bash
+uv python install 3.12      # install a Python version
+uv sync                     # make .venv match uv.lock exactly
+uvx ruff check .            # run a tool without installing it
+```
+
+### uv still speaks pip
+
+If a project is built around `requirements.txt`, you do not have to migrate to adopt `uv`. It has a pip-compatible interface:
+
+```bash
+uv venv
+uv pip install -r requirements.txt
+```
+
+This is the easiest way to try it: same files, same mental model, a faster installer.
+
+## uvicorn: the thing that runs your app
+
+`uvicorn` does not install anything. It is an ASGI server. Frameworks like FastAPI and Starlette define an application object, but they do not listen on a network port by themselves. `uvicorn` does that part: it accepts HTTP connections and hands each request to your app.
+
+```python
+# main.py
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/")
+def read_root() -> dict[str, str]:
+    return {"status": "ok"}
+```
+
+```bash
+uvicorn main:app --reload
+```
+
+`main:app` means "the `app` object in `main.py`". The `--reload` flag restarts the server when a file changes, which is for development only. In production you drop it and usually run several workers behind a reverse proxy.
+
+Because `uvicorn` is itself a Python package, it has to be *installed* by `pip` or `uv` first. That is the clearest way to see the difference: one of them is a dependency, the other two are how you get dependencies.
+
+## How they fit together
+
+In a FastAPI project, all three can appear in the same day, each at a different step.
+
+1. **Install** — `pip` or `uv` puts `fastapi` and `uvicorn` into the environment.
+2. **Run** — `uvicorn` starts the server and loads your `app`.
+3. **Ship** — the lockfile from `uv` (or `requirements.txt` from `pip`) rebuilds the same environment in Docker or CI.
+
+With `uv`, steps one and two even chain naturally:
+
+```bash
+uv add fastapi uvicorn
+uv run uvicorn main:app --reload
+```
+
+`uv run` guarantees the environment is in sync, then hands control to `uvicorn`, which serves the app.
+
+## Which one should you use
+
+The question is really two separate questions.
+
+**For installing**, pick between `pip` and `uv`:
+
+- Use `pip` when you want zero extra tooling, or you are in an environment where only the standard toolchain is allowed.
+- Use `uv` for new projects, for CI where install time matters, and anywhere you want a real lockfile and pinned Python versions without extra tools.
+
+**For serving an ASGI app**, `uvicorn` is the common default. Its alternatives are other servers such as Hypercorn or Granian, not `pip` or `uv`.
+
+## A Dockerfile that uses both
+
+A production image is a good place to see the split clearly. `uv` builds the environment, `uvicorn` runs the result.
+
+```dockerfile
+FROM python:3.12-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY . .
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0"]
+```
+
+`--frozen` makes the build fail if `uv.lock` is out of date instead of silently resolving new versions, which is exactly what you want in an image.
+
+## The takeaway
+
+`pip` installs packages. `uv` installs packages and manages everything around them, faster. `uvicorn` is a package you install with either of them, and its job is to run your web app.
+
+Once you file them under "getting code" and "running code", the shared letters stop being confusing.
